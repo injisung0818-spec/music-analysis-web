@@ -514,12 +514,12 @@ export default function App() {
     const gain = context.createGain();
     oscillator.type = "square";
     oscillator.frequency.value = accent ? 1480 : 940;
-    gain.gain.setValueAtTime(accent ? 0.18 : 0.12, start);
-    gain.gain.exponentialRampToValueAtTime(0.001, start + 0.055);
+    gain.gain.setValueAtTime(accent ? 0.32 : 0.22, start);
+    gain.gain.exponentialRampToValueAtTime(0.001, start + 0.07);
     oscillator.connect(gain);
     gain.connect(context.destination);
     oscillator.start(start);
-    oscillator.stop(start + 0.06);
+    oscillator.stop(start + 0.075);
   }
 
   function syncVerticalScroll(source: "controls" | "lanes") {
