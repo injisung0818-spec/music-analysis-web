@@ -393,6 +393,15 @@ export default function App() {
     const song = songs.find((item) => item.id === songId);
     if (!song) return;
     const backendJobId = song.jobId ?? song.job?.id;
+    if (backendJobId) {
+      try {
+        await deleteJob(backendJobId);
+      } catch (deleteError) {
+        setError(String(deleteError));
+        return;
+      }
+    }
+
     const remainingSongs = sortSongs(songs.filter((item) => item.id !== songId));
     const nextSong = remainingSongs[0] ?? null;
     setOpenSongMenuId(null);
@@ -406,13 +415,6 @@ export default function App() {
       setActiveSongId(nextSong?.id ?? null);
     }
     setSongs(remainingSongs);
-    if (backendJobId) {
-      try {
-        await deleteJob(backendJobId);
-      } catch (deleteError) {
-        setError(String(deleteError));
-      }
-    }
   }
 
   function firstPlayableAudio() {
@@ -588,6 +590,17 @@ export default function App() {
     const removedSongIds = new Set(removedSongs.map((song) => song.id));
     const remainingSongs = sortSongs(songs.filter((song) => !removedSongIds.has(song.id)));
     const nextSong = remainingSongs[0] ?? null;
+    const deleteResults = await Promise.allSettled(
+      removedSongs
+        .map((song) => song.jobId ?? song.job?.id)
+        .filter((jobId): jobId is string => Boolean(jobId))
+        .map((jobId) => deleteJob(jobId))
+    );
+    const failed = deleteResults.find((result) => result.status === "rejected");
+    if (failed) {
+      setError(String(failed.reason));
+      return;
+    }
 
     setOpenFolderMenuId(null);
     setEditingFolderId(null);
@@ -603,15 +616,6 @@ export default function App() {
       setError(null);
       setActiveSongId(nextSong?.id ?? null);
     }
-
-    const deleteResults = await Promise.allSettled(
-      removedSongs
-        .map((song) => song.jobId ?? song.job?.id)
-        .filter((jobId): jobId is string => Boolean(jobId))
-        .map((jobId) => deleteJob(jobId))
-    );
-    const failed = deleteResults.find((result) => result.status === "rejected");
-    if (failed) setError(String(failed.reason));
   }
 
   function moveSongToFolder(songId: string, folderId: string | null) {

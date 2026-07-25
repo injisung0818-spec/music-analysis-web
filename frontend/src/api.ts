@@ -43,7 +43,20 @@ export async function deleteJob(id: string): Promise<void> {
   const response = await fetch(`${API_BASE}/api/jobs/${id}`, {
     method: "DELETE"
   });
-  if (response.status === 404 || response.status === 405) return;
+  if (response.status === 404) return;
+  if (response.status === 405) {
+    const fallback = await fetch(`${API_BASE}/api/jobs/${id}/delete`, {
+      method: "POST"
+    });
+    if (fallback.status === 404) return;
+    if (fallback.status === 405) {
+      throw new Error("백엔드 서버가 삭제 API를 아직 반영하지 않았습니다. 서버를 재시작한 뒤 다시 삭제하세요.");
+    }
+    if (!fallback.ok) {
+      throw new Error(await fallback.text());
+    }
+    return;
+  }
   if (!response.ok) {
     throw new Error(await response.text());
   }

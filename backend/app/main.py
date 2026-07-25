@@ -195,6 +195,11 @@ async def delete_job(job_id: str) -> None:
     await store.delete(job_id)
 
 
+@app.post("/api/jobs/{job_id}/delete", status_code=204)
+async def post_delete_job(job_id: str) -> None:
+    await store.delete(job_id)
+
+
 @app.get("/api/jobs/{job_id}/analysis")
 async def get_analysis(job_id: str) -> dict:
     state = await store.get(job_id)
