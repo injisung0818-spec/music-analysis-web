@@ -10,10 +10,10 @@
 - `librosa` BPM, beat grid, key, chroma chord timeline analysis when installed
 - `basic-pitch` MIDI extraction when installed
 - Faster default upload mode skips heavy Basic Pitch MIDI inference and writes placeholder MIDI; set `MUSIC_FAST_UPLOAD=0` for full MIDI extraction
-- Storage-saving result mode compresses generated stem WAV files to AAC `.m4a` when `ffmpeg` is available, then removes temporary WAV/source files
-- Original uploaded files are deleted right after conversion, and fallback silent stem files are skipped to reduce disk usage without changing audible output
+- Storage-saving result mode converts generated stem WAV files to lossless FLAC `.flac` when `ffmpeg` is available, then removes temporary WAV/source files
+- Original uploaded files are deleted right after conversion, and silent stem files are skipped to reduce disk usage without changing audible output
 - Graceful fallback mode: missing `ffmpeg`, `demucs`, `librosa`, or `basic-pitch` will not crash a job
-- Outputs per job: compressed `stems/*.m4a` when possible, `midi/*.mid`, `analysis.json`
+- Outputs per job: lossless `stems/*.flac` when possible, fallback `stems/*.wav`, `midi/*.mid`, `analysis.json`
 - React/Vite/TypeScript UI with transport, stem mute/solo/volume, waveform lanes, progress and warnings
 
 ## Project Structure
@@ -74,12 +74,12 @@ Each upload creates:
 backend/storage/jobs/<job_id>/
   analysis.json
   stems/
-    vocals.m4a
-    drums.m4a
-    bass.m4a
-    guitar.m4a
-    piano.m4a
-    other.m4a
+    vocals.flac
+    drums.flac
+    bass.flac
+    guitar.flac
+    piano.flac
+    other.flac
   midi/
     vocals.mid
     drums.mid
@@ -93,7 +93,7 @@ backend/storage/jobs/<job_id>/
 
 - The first Demucs or Basic Pitch run may be slow and may require model downloads, depending on local installation.
 - By default, `MUSIC_FAST_UPLOAD=1` keeps uploads faster by skipping Basic Pitch inference. Stem separation, waveform, BPM, key, and chord analysis still run locally.
-- Stem audio is stored as `.m4a` at `MUSIC_STEM_BITRATE=96k` by default when `ffmpeg` is available. Increase the bitrate, for example `MUSIC_STEM_BITRATE=160k`, if you want higher quality.
-- Lowering `MUSIC_STEM_BITRATE` saves more space but is a lossy tradeoff; the app reduces extra storage without that tradeoff by removing source/intermediate/silent fallback files.
+- Stem audio is stored as lossless `.flac` with `MUSIC_FLAC_COMPRESSION_LEVEL=8` by default when `ffmpeg` is available. FLAC reduces WAV storage without changing audio quality.
+- If a separated stem is effectively silent, the stem file is skipped and `analysis.json` marks it with `silent: true` and `skipped_reason: "silent"`.
 - If `ffmpeg` is missing and an MP3 is uploaded, the backend generates silent fallback WAVs and still returns a completed job with warnings.
 - This app does not call external paid APIs.

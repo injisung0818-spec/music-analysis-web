@@ -2,6 +2,11 @@
 
 Local FastAPI service for upload, conversion, stem separation, analysis, and result assets.
 
+Stem audio is saved as lossless FLAC when `ffmpeg` is available. If `ffmpeg`
+is missing, generated WAV stems are kept. Uploaded source files, `source.wav`,
+Demucs intermediate folders, and effectively silent stems are removed or skipped
+to reduce storage without lossy audio compression.
+
 ## Setup
 
 ```bash

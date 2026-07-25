@@ -30,6 +30,8 @@ export interface StemAsset {
   audio_url: string | null;
   midi_url: string | null;
   waveform: number[];
+  silent?: boolean;
+  skipped_reason?: string;
 }
 
 export type StemName = "vocals" | "drums" | "bass" | "guitar" | "piano" | "other";
