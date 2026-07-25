@@ -5,6 +5,7 @@ import json
 import shutil
 import uuid
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated
 
@@ -21,6 +22,7 @@ STORAGE_DIR = BASE_DIR / "storage"
 UPLOADS_DIR = STORAGE_DIR / "uploads"
 JOBS_DIR = STORAGE_DIR / "jobs"
 ALLOWED_SUFFIXES = {".mp3", ".wav"}
+STALE_INCOMPLETE_JOB_SECONDS = 20 * 60
 
 
 class JobResponse(BaseModel):
@@ -128,6 +130,31 @@ store = JobStore()
 processor = MusicProcessor(store.update)
 
 
+def cleanup_stale_incomplete_jobs() -> None:
+    if not JOBS_DIR.exists():
+        return
+    now = datetime.now(timezone.utc)
+    for job_path in JOBS_DIR.iterdir():
+        job_json = job_path / "job.json"
+        if not job_path.is_dir() or not job_json.exists():
+            continue
+        try:
+            data = json.loads(job_json.read_text(encoding="utf-8"))
+            if data.get("status") == "done" or (job_path / "analysis.json").exists():
+                continue
+            updated_at = datetime.fromisoformat(str(data.get("updated_at", "")).replace("Z", "+00:00"))
+            if updated_at.tzinfo is None:
+                updated_at = updated_at.replace(tzinfo=timezone.utc)
+            if (now - updated_at).total_seconds() < STALE_INCOMPLETE_JOB_SECONDS:
+                continue
+            shutil.rmtree(job_path, ignore_errors=True)
+            source_path = data.get("source_path")
+            if source_path:
+                shutil.rmtree(Path(source_path).parent, ignore_errors=True)
+        except Exception:
+            continue
+
+
 async def worker() -> None:
     while True:
         job_id = await store.queue.get()
@@ -143,6 +170,7 @@ async def lifespan(app: FastAPI):
     STORAGE_DIR.mkdir(exist_ok=True)
     UPLOADS_DIR.mkdir(exist_ok=True)
     JOBS_DIR.mkdir(exist_ok=True)
+    cleanup_stale_incomplete_jobs()
     task = asyncio.create_task(worker())
     yield
     task.cancel()

@@ -30,6 +30,7 @@ MAJOR_PROFILE = [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.2
 MINOR_PROFILE = [6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17]
 ANALYSIS_SAMPLE_RATE = 22050
 CHROMA_HOP_LENGTH = 2048
+DEFAULT_STEM_BITRATE = "80k"
 
 
 def now_iso() -> str:
@@ -62,10 +63,10 @@ class MusicProcessor:
         self.update_job = update_job
 
     async def process(self, state: JobState) -> None:
+        job_dir = Path(state.job_dir)
+        source = Path(state.source_path)
         try:
             await self._set(state, "running", 0.03, "오디오 준비 중")
-            job_dir = Path(state.job_dir)
-            source = Path(state.source_path)
             audio_wav = job_dir / "source.wav"
             stems_dir = job_dir / "stems"
             midi_dir = job_dir / "midi"
@@ -119,6 +120,7 @@ class MusicProcessor:
             cleanup_intermediates(source, converted, stems_dir)
             await self._set(state, "done", 1.0, "분석 완료")
         except Exception as exc:
+            cleanup_failed_artifacts(job_dir, source)
             state.error = str(exc)
             await self._set(state, "error", state.progress, "처리 실패")
 
@@ -309,7 +311,7 @@ class MusicProcessor:
                 "-c:a",
                 "aac",
                 "-b:a",
-                os.getenv("MUSIC_STEM_BITRATE", "96k"),
+                os.getenv("MUSIC_STEM_BITRATE", DEFAULT_STEM_BITRATE),
                 "-movflags",
                 "+faststart",
                 str(target),
@@ -606,6 +608,17 @@ def cleanup_intermediates(source: Path, converted: Path, stems_dir: Path) -> Non
     converted.unlink(missing_ok=True)
     remove_upload_source(source)
     shutil.rmtree(stems_dir / "_demucs", ignore_errors=True)
+
+
+def cleanup_failed_artifacts(job_dir: Path, source: Path) -> None:
+    remove_upload_source(source)
+    if (job_dir / "analysis.json").exists():
+        (job_dir / "source.wav").unlink(missing_ok=True)
+        return
+
+    (job_dir / "source.wav").unlink(missing_ok=True)
+    shutil.rmtree(job_dir / "stems", ignore_errors=True)
+    shutil.rmtree(job_dir / "midi", ignore_errors=True)
 
 
 def write_var_len(value: int) -> bytes:

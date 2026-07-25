@@ -93,7 +93,7 @@ backend/storage/jobs/<job_id>/
 
 - The first Demucs or Basic Pitch run may be slow and may require model downloads, depending on local installation.
 - By default, `MUSIC_FAST_UPLOAD=1` keeps uploads faster by skipping Basic Pitch inference. Stem separation, waveform, BPM, key, and chord analysis still run locally.
-- Stem audio is stored as `.m4a` at `MUSIC_STEM_BITRATE=96k` by default when `ffmpeg` is available. Increase the bitrate, for example `MUSIC_STEM_BITRATE=160k`, if you want higher quality.
+- Stem audio is stored as `.m4a` at `MUSIC_STEM_BITRATE=80k` by default when `ffmpeg` is available. Set `MUSIC_STEM_BITRATE=96k` or `160k` if you want larger files with higher quality.
 - Lowering `MUSIC_STEM_BITRATE` saves more space but is a lossy tradeoff; the app reduces extra storage without that tradeoff by removing source/intermediate/silent fallback files.
 - If `ffmpeg` is missing and an MP3 is uploaded, the backend generates silent fallback WAVs and still returns a completed job with warnings.
 - This app does not call external paid APIs.
