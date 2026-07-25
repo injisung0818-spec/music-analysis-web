@@ -290,7 +290,7 @@ def write_silent_wav(path: Path, duration: float, sample_rate: int = 44100) -> N
             remaining -= chunk
 
 
-def waveform_peaks(path: Path, points: int = 240) -> list[float]:
+def waveform_peaks(path: Path, points: int = 1200) -> list[float]:
     try:
         with wave.open(str(path), "rb") as handle:
             channels = handle.getnchannels()

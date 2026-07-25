@@ -125,6 +125,10 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const audioRefs = useRef<Record<string, HTMLAudioElement | null>>({});
   const rafRef = useRef<number | null>(null);
+  const controlsScrollRef = useRef<HTMLDivElement | null>(null);
+  const lanesScrollRef = useRef<HTMLDivElement | null>(null);
+  const rulerScrollRef = useRef<HTMLDivElement | null>(null);
+  const syncingScrollRef = useRef(false);
 
   const soloActive = useMemo(() => Object.values(tracks).some((track) => track.solo), [tracks]);
   const duration = analysis?.duration ?? 0;
@@ -138,6 +142,7 @@ export default function App() {
   const progress = Math.round((job?.progress ?? 0) * 100);
   const stems = analysis?.stems ?? stemPlaceholders();
   const modalOpen = modalView !== null;
+  const timelineWidth = Math.max(1180, Math.round((duration || 30) * 42));
 
   useEffect(() => {
     if (!job || job.status === "done" || job.status === "error") return;
@@ -251,6 +256,25 @@ export default function App() {
 
   function updateTrack(name: StemName, patch: Partial<TrackState>) {
     setTracks((prev) => ({ ...prev, [name]: { ...prev[name], ...patch } }));
+  }
+
+  function syncVerticalScroll(source: "controls" | "lanes") {
+    if (syncingScrollRef.current) return;
+    const from = source === "controls" ? controlsScrollRef.current : lanesScrollRef.current;
+    const to = source === "controls" ? lanesScrollRef.current : controlsScrollRef.current;
+    if (!from || !to) return;
+    syncingScrollRef.current = true;
+    to.scrollTop = from.scrollTop;
+    requestAnimationFrame(() => {
+      syncingScrollRef.current = false;
+    });
+  }
+
+  function syncHorizontalScroll() {
+    if (rulerScrollRef.current && lanesScrollRef.current) {
+      rulerScrollRef.current.scrollLeft = lanesScrollRef.current.scrollLeft;
+    }
+    syncVerticalScroll("lanes");
   }
 
   function addFolder() {
@@ -374,22 +398,38 @@ export default function App() {
           )}
         </aside>}
 
-        <section className="arranger">
+        <section className="arranger" style={{ "--timeline-width": `${timelineWidth}px` } as CSSProperties}>
           <div className="trackHeaderSpacer" />
-          <Ruler currentTime={currentTime} duration={duration || 30} onSeek={seek} />
-          {stems.map((stem) => (
-            <TrackRow
-              key={stem.name}
-              name={stem.name}
-              color={stem.color}
-              waveform={stem.waveform}
-              state={tracks[stem.name]}
-              duration={duration || 30}
-              currentTime={currentTime}
-              onSeek={seek}
-              onUpdate={updateTrack}
-            />
-          ))}
+          <div className="rulerViewport" ref={rulerScrollRef}>
+            <Ruler currentTime={currentTime} duration={duration || 30} onSeek={seek} />
+          </div>
+          <div className="trackControlsScroller" ref={controlsScrollRef} onScroll={() => syncVerticalScroll("controls")}>
+            <div className="trackControlsStack">
+              {stems.map((stem) => (
+                <TrackControlsRow
+                  key={stem.name}
+                  name={stem.name}
+                  color={stem.color}
+                  state={tracks[stem.name]}
+                  onUpdate={updateTrack}
+                />
+              ))}
+            </div>
+          </div>
+          <div className="lanesScroller" ref={lanesScrollRef} onScroll={syncHorizontalScroll}>
+            <div className="lanesStack">
+              {stems.map((stem) => (
+                <RegionLane
+                  key={stem.name}
+                  color={stem.color}
+                  waveform={stem.waveform}
+                  duration={duration || 30}
+                  currentTime={currentTime}
+                  onSeek={seek}
+                />
+              ))}
+            </div>
+          </div>
           {analysis?.stems.map((stem) => (
             <audio
               key={stem.name}
@@ -673,66 +713,75 @@ function Ruler({ currentTime, duration, onSeek }: { currentTime: number; duratio
   );
 }
 
-function TrackRow({
+function TrackControlsRow({
   name,
   color,
-  waveform,
   state,
-  duration,
-  currentTime,
-  onSeek,
   onUpdate
 }: {
   name: StemName;
   color: string;
-  waveform: number[];
   state: TrackState;
+  onUpdate: (name: StemName, patch: Partial<TrackState>) => void;
+}) {
+  return (
+    <div className="trackControls" style={{ "--accent": color } as CSSProperties}>
+      <div className="stemIcon">
+        <img src={STEM_ICONS[name]} alt="" aria-hidden="true" />
+      </div>
+      <div className="trackMeta">
+        <strong>{STEM_LABELS[name]}</strong>
+        <div className="trackButtons">
+          <button className={state.muted ? "active" : ""} onClick={() => onUpdate(name, { muted: !state.muted })}>M</button>
+          <button className={state.solo ? "solo active" : ""} onClick={() => onUpdate(name, { solo: !state.solo })}>S</button>
+        </div>
+      </div>
+      <input
+        aria-label={`${STEM_LABELS[name]} 볼륨`}
+        type="range"
+        min="0"
+        max="1"
+        step="0.01"
+        value={state.volume}
+        onChange={(event) => onUpdate(name, { volume: Number(event.target.value) })}
+      />
+      <span className="panKnob" />
+    </div>
+  );
+}
+
+function RegionLane({
+  color,
+  waveform,
+  duration,
+  currentTime,
+  onSeek
+}: {
+  color: string;
+  waveform: number[];
   duration: number;
   currentTime: number;
   onSeek: (time: number) => void;
-  onUpdate: (name: StemName, patch: Partial<TrackState>) => void;
 }) {
-  const peaks = waveform.length ? waveform : Array.from({ length: 96 }, (_, i) => 0.25 + Math.abs(Math.sin(i * 0.21)) * 0.45);
+  const peaks = waveform.length ? resamplePeaks(waveform, Math.max(180, Math.min(1800, Math.round(duration * 4)))) : [];
   return (
-    <>
-      <div className="trackControls" style={{ "--accent": color } as CSSProperties}>
-        <div className="stemIcon">
-          <img src={STEM_ICONS[name]} alt="" aria-hidden="true" />
+    <div
+      className="regionLane"
+      style={{ "--accent": color } as CSSProperties}
+      onClick={(event) => {
+        const rect = event.currentTarget.getBoundingClientRect();
+        onSeek(((event.clientX - rect.left) / rect.width) * duration);
+      }}
+    >
+      <div className="region">
+        <div className={`regionWave ${peaks.length ? "" : "empty"}`}>
+          {peaks.length
+            ? peaks.map((peak, index) => <span key={index} style={{ height: `${Math.max(4, peak * 72)}px` }} />)
+            : <small>분석 대기 중</small>}
         </div>
-        <div className="trackMeta">
-          <strong>{STEM_LABELS[name]}</strong>
-          <div className="trackButtons">
-            <button className={state.muted ? "active" : ""} onClick={() => onUpdate(name, { muted: !state.muted })}>M</button>
-            <button className={state.solo ? "solo active" : ""} onClick={() => onUpdate(name, { solo: !state.solo })}>S</button>
-          </div>
-        </div>
-        <input
-          aria-label={`${STEM_LABELS[name]} 볼륨`}
-          type="range"
-          min="0"
-          max="1"
-          step="0.01"
-          value={state.volume}
-          onChange={(event) => onUpdate(name, { volume: Number(event.target.value) })}
-        />
-        <span className="panKnob" />
       </div>
-      <div
-        className="regionLane"
-        style={{ "--accent": color } as CSSProperties}
-        onClick={(event) => {
-          const rect = event.currentTarget.getBoundingClientRect();
-          onSeek(((event.clientX - rect.left) / rect.width) * duration);
-        }}
-      >
-        <div className="region">
-          <div className="regionWave">
-            {peaks.map((peak, index) => <span key={index} style={{ height: `${Math.max(4, peak * 56)}px` }} />)}
-          </div>
-        </div>
-        <i className="playhead" style={{ left: `${duration ? (currentTime / duration) * 100 : 0}%` }} />
-      </div>
-    </>
+      <i className="playhead" style={{ left: `${duration ? (currentTime / duration) * 100 : 0}%` }} />
+    </div>
   );
 }
 
@@ -825,6 +874,18 @@ function formatTime(seconds: number) {
   const secs = Math.floor(safe % 60).toString().padStart(2, "0");
   const millis = Math.floor((safe % 1) * 100).toString().padStart(2, "0");
   return `${mins}:${secs}.${millis}`;
+}
+
+function resamplePeaks(peaks: number[], targetLength: number) {
+  if (peaks.length === targetLength) return peaks;
+  if (peaks.length === 1) return Array.from({ length: targetLength }, () => peaks[0]);
+  return Array.from({ length: targetLength }, (_, index) => {
+    const position = (index / Math.max(1, targetLength - 1)) * (peaks.length - 1);
+    const left = Math.floor(position);
+    const right = Math.min(peaks.length - 1, left + 1);
+    const blend = position - left;
+    return peaks[left] * (1 - blend) + peaks[right] * blend;
+  });
 }
 
 function createId() {
