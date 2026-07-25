@@ -1314,14 +1314,14 @@ function RegionLane({
   const wavePath = hasAudibleWave ? buildWavePath(peaks) : "";
   return (
     <div
-      className="regionLane"
+      className={`regionLane ${silent ? "silentLane" : ""}`}
       style={{ "--accent": color } as CSSProperties}
       onClick={(event) => {
         const rect = event.currentTarget.getBoundingClientRect();
         onSeek(((event.clientX - rect.left) / rect.width) * duration);
       }}
     >
-      <div className="region">
+      <div className={`region ${silent ? "silentRegion" : ""}`}>
         <div className={`regionWave ${hasAudibleWave ? "" : "empty"}`}>
           {hasAudibleWave ? (
             <svg className="waveSvg" viewBox="0 0 1000 100" preserveAspectRatio="none" aria-hidden="true">

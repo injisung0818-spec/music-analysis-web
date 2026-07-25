@@ -1359,6 +1359,15 @@ button {
   background: color-mix(in srgb, var(--accent), white 12%);
 }
 
+.silentLane {
+  background: #202020;
+}
+
+.region.silentRegion {
+  border: 1px dashed rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.025);
+}
+
 .regionWave {
   height: 100%;
   position: relative;
@@ -1383,12 +1392,12 @@ button {
 .regionWave.empty {
   display: grid;
   align-items: center;
-  opacity: 0.32;
+  opacity: 1;
 }
 
 .regionWave.empty small {
-  color: rgba(24, 24, 24, 0.6);
-  font-size: 13px;
+  color: rgba(210, 230, 232, 0.18);
+  font-size: 12px;
   font-weight: 800;
 }
 
