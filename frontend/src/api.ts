@@ -23,12 +23,29 @@ export async function fetchJob(id: string): Promise<JobResponse> {
   return response.json();
 }
 
+export async function fetchJobs(): Promise<JobResponse[]> {
+  const response = await fetch(`${API_BASE}/api/jobs`);
+  if (!response.ok) {
+    throw new Error(await response.text());
+  }
+  return response.json();
+}
+
 export async function fetchAnalysis(id: string): Promise<Analysis> {
   const response = await fetch(`${API_BASE}/api/jobs/${id}/analysis`);
   if (!response.ok) {
     throw new Error(await response.text());
   }
   return response.json();
+}
+
+export async function deleteJob(id: string): Promise<void> {
+  const response = await fetch(`${API_BASE}/api/jobs/${id}`, {
+    method: "DELETE"
+  });
+  if (!response.ok) {
+    throw new Error(await response.text());
+  }
 }
 
 export function assetUrl(path: string | null): string | null {

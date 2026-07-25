@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, MouseEvent as ReactMouseEvent } from "react";
-import { assetUrl, fetchAnalysis, fetchJob, uploadAudio } from "./api";
+import { assetUrl, deleteJob, fetchAnalysis, fetchJob, fetchJobs, uploadAudio } from "./api";
 import type { Analysis, JobResponse, StemName, TrackState } from "./types";
 import iconBass from "./assets/figma-icons/bass.svg";
 import iconDrums from "./assets/figma-icons/drums.svg";
@@ -101,6 +101,8 @@ const MESSAGE_LABELS: Record<string, string> = {
   "Processing failed": "처리 실패"
 };
 
+const LIBRARY_STORAGE_KEY = "local-music-analysis-library-v1";
+
 type LibraryFolder = {
   id: string;
   name: string;
@@ -109,11 +111,22 @@ type LibraryFolder = {
 
 type LibrarySong = {
   id: string;
+  jobId: string | null;
   title: string;
   folderId: string | null;
+  pinned: boolean;
   job: JobResponse | null;
   analysis: Analysis | null;
   error: string | null;
+};
+
+type LibraryMetadata = {
+  folders: LibraryFolder[];
+  songs: Record<string, {
+    title?: string;
+    folderId?: string | null;
+    pinned?: boolean;
+  }>;
 };
 
 type ModalView = "add" | "upload" | null;
@@ -135,6 +148,9 @@ export default function App() {
   const [songs, setSongs] = useState<LibrarySong[]>([]);
   const [activeSongId, setActiveSongId] = useState<string | null>(null);
   const [editingFolderId, setEditingFolderId] = useState<string | null>(null);
+  const [editingSongId, setEditingSongId] = useState<string | null>(null);
+  const [openSongMenuId, setOpenSongMenuId] = useState<string | null>(null);
+  const [libraryLoaded, setLibraryLoaded] = useState(false);
   const [uploadFileName, setUploadFileName] = useState("");
   const [libraryWidth, setLibraryWidth] = useState(286);
   const [trackControlsWidth, setTrackControlsWidth] = useState(620);
@@ -167,6 +183,7 @@ export default function App() {
   const transportKey = analysis ? `${analysis.key} ${modeLabel(analysis.mode)}` : "Cmin";
   const progress = Math.round((job?.progress ?? 0) * 100);
   const stems = analysis?.stems ?? stemPlaceholders();
+  const orderedSongs = useMemo(() => sortSongs(songs), [songs]);
   const modalOpen = modalView !== null;
   const displayDuration = duration || 120;
   const timelinePixelsPerSecond = analysis ? 16 : 22;
@@ -181,6 +198,61 @@ export default function App() {
   useEffect(() => {
     currentTimeRef.current = currentTime;
   }, [currentTime]);
+
+  useEffect(() => {
+    let mounted = true;
+
+    async function restoreLibrary() {
+      const metadata = readLibraryMetadata();
+      try {
+        const jobs = await fetchJobs();
+        const restoredSongs = await Promise.all(jobs.map(async (storedJob) => {
+          const meta = metadata.songs[storedJob.id] ?? {};
+          let restoredAnalysis: Analysis | null = null;
+          if (storedJob.status === "done") {
+            try {
+              restoredAnalysis = applyStemPalette(await fetchAnalysis(storedJob.id));
+            } catch {
+              restoredAnalysis = null;
+            }
+          }
+          return {
+            id: storedJob.id,
+            jobId: storedJob.id,
+            title: meta.title ?? storedJob.original_filename,
+            folderId: meta.folderId ?? null,
+            pinned: meta.pinned ?? false,
+            job: storedJob,
+            analysis: restoredAnalysis,
+            error: storedJob.error ?? null
+          };
+        }));
+        if (!mounted) return;
+        const nextSongs = sortSongs(restoredSongs);
+        const firstSong = nextSongs[0] ?? null;
+        setFolders(metadata.folders);
+        setSongs(nextSongs);
+        setActiveSongId(firstSong?.id ?? null);
+        setJob(firstSong?.job ?? null);
+        setAnalysis(firstSong?.analysis ?? null);
+        setError(firstSong?.error ?? null);
+      } catch (restoreError) {
+        if (mounted) setError(String(restoreError));
+      } finally {
+        if (mounted) setLibraryLoaded(true);
+      }
+    }
+
+    void restoreLibrary();
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!libraryLoaded) return;
+    writeLibraryMetadata(folders, songs);
+  }, [folders, songs, libraryLoaded]);
 
   useEffect(() => {
     if (!job || job.status === "done" || job.status === "error") return;
@@ -286,12 +358,12 @@ export default function App() {
     setUploadFileName(file.name);
     setModalView("upload");
     const songId = createId();
-    setSongs((prev) => [...prev, { id: songId, title: file.name, folderId: null, job: null, analysis: null, error: null }]);
+    setSongs((prev) => sortSongs([...prev, { id: songId, jobId: null, title: file.name, folderId: null, pinned: false, job: null, analysis: null, error: null }]));
     setActiveSongId(songId);
     try {
       const created = await uploadAudio(file);
       setJob(created);
-      setSongs((prev) => prev.map((song) => (song.id === songId ? { ...song, job: created } : song)));
+      setSongs((prev) => sortSongs(prev.map((song) => (song.id === songId ? { ...song, jobId: created.id, job: created } : song))));
     } catch (uploadError) {
       const message = String(uploadError);
       setError(message);
@@ -313,6 +385,43 @@ export default function App() {
     metronomeBeatRef.current = -1;
     if (lanesScrollRef.current) lanesScrollRef.current.scrollLeft = 0;
     if (rulerScrollRef.current) rulerScrollRef.current.scrollLeft = 0;
+  }
+
+  function renameSong(songId: string, title: string) {
+    const safeTitle = title.trim() || "이름 없는 노래";
+    setSongs((prev) => prev.map((song) => (song.id === songId ? { ...song, title: safeTitle } : song)));
+    setEditingSongId(null);
+  }
+
+  function toggleSongPin(songId: string) {
+    setSongs((prev) => sortSongs(prev.map((song) => (song.id === songId ? { ...song, pinned: !song.pinned } : song))));
+    setOpenSongMenuId(null);
+  }
+
+  async function removeSong(songId: string) {
+    const song = songs.find((item) => item.id === songId);
+    if (!song) return;
+    const backendJobId = song.jobId ?? song.job?.id;
+    const remainingSongs = sortSongs(songs.filter((item) => item.id !== songId));
+    const nextSong = remainingSongs[0] ?? null;
+    setOpenSongMenuId(null);
+    if (activeSongId === songId) {
+      setIsPlaying(false);
+      pauseAll();
+      setCurrentTime(0);
+      setJob(nextSong?.job ?? null);
+      setAnalysis(nextSong?.analysis ?? null);
+      setError(null);
+      setActiveSongId(nextSong?.id ?? null);
+    }
+    setSongs(remainingSongs);
+    if (backendJobId) {
+      try {
+        await deleteJob(backendJobId);
+      } catch (deleteError) {
+        setError(String(deleteError));
+      }
+    }
   }
 
   function firstPlayableAudio() {
@@ -622,25 +731,47 @@ export default function App() {
                 onEdit={() => setEditingFolderId(folder.id)}
                 onToggle={() => setFolders((prev) => prev.map((item) => (item.id === folder.id ? { ...item, open: !item.open } : item)))}
               />
-              {folder.open && songs.filter((song) => song.folderId === folder.id).map((song) => (
+              {folder.open && orderedSongs.filter((song) => song.folderId === folder.id).map((song) => (
                 <SongRow
                   key={song.id}
                   id={song.id}
                   label={song.title}
+                  pinned={song.pinned}
                   nested
                   active={activeSongId === song.id}
+                  editing={editingSongId === song.id}
+                  menuOpen={openSongMenuId === song.id}
                   onSelect={() => selectSong(song.id)}
+                  onRename={(title) => renameSong(song.id, title)}
+                  onEdit={() => {
+                    setEditingSongId(song.id);
+                    setOpenSongMenuId(null);
+                  }}
+                  onTogglePin={() => toggleSongPin(song.id)}
+                  onDelete={() => void removeSong(song.id)}
+                  onMenu={() => setOpenSongMenuId((openId) => (openId === song.id ? null : song.id))}
                 />
               ))}
             </div>
           ))}
-          {songs.filter((song) => song.folderId === null).map((song) => (
+          {orderedSongs.filter((song) => song.folderId === null).map((song) => (
             <SongRow
               key={song.id}
               id={song.id}
               label={song.title}
+              pinned={song.pinned}
               active={activeSongId === song.id}
+              editing={editingSongId === song.id}
+              menuOpen={openSongMenuId === song.id}
               onSelect={() => selectSong(song.id)}
+              onRename={(title) => renameSong(song.id, title)}
+              onEdit={() => {
+                setEditingSongId(song.id);
+                setOpenSongMenuId(null);
+              }}
+              onTogglePin={() => toggleSongPin(song.id)}
+              onDelete={() => void removeSong(song.id)}
+              onMenu={() => setOpenSongMenuId((openId) => (openId === song.id ? null : song.id))}
             />
           ))}
           {!folders.length && !songs.length && (
@@ -944,29 +1075,82 @@ function LibraryRow({
 function SongRow({
   id,
   label,
+  pinned = false,
   active = false,
   nested = false,
+  editing = false,
+  menuOpen = false,
+  onRename,
+  onEdit,
+  onTogglePin,
+  onDelete,
+  onMenu,
   onSelect
 }: {
   id: string;
   label: string;
+  pinned?: boolean;
   active?: boolean;
   nested?: boolean;
+  editing?: boolean;
+  menuOpen?: boolean;
+  onRename: (title: string) => void;
+  onEdit: () => void;
+  onTogglePin: () => void;
+  onDelete: () => void;
+  onMenu: () => void;
   onSelect: () => void;
 }) {
+  const [draft, setDraft] = useState(label);
+
+  useEffect(() => {
+    setDraft(label);
+  }, [label, editing]);
+
   return (
     <div
-      className={`songRow ${active ? "active" : ""} ${nested ? "nested" : ""}`}
+      className={`songRow ${active ? "active" : ""} ${nested ? "nested" : ""} ${pinned ? "pinned" : ""}`}
       draggable
-      onClick={onSelect}
+      onClick={() => {
+        if (!editing) onSelect();
+      }}
       onDragStart={(event) => {
         event.dataTransfer.setData("application/x-song-id", id);
         event.dataTransfer.effectAllowed = "move";
       }}
     >
       <span className="tinyWave">▥</span>
-      <strong>{label}</strong>
-      <button aria-label="더보기">⋮</button>
+      {editing ? (
+        <input
+          className="songNameInput"
+          autoFocus
+          value={draft}
+          onClick={(event) => event.stopPropagation()}
+          onChange={(event) => setDraft(event.target.value)}
+          onBlur={() => onRename(draft)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") onRename(draft);
+            if (event.key === "Escape") onRename(label);
+          }}
+        />
+      ) : (
+        <strong>{pinned ? "● " : ""}{label}</strong>
+      )}
+      <button
+        aria-label="노래 메뉴"
+        className="songMenuButton"
+        onClick={(event) => {
+          event.stopPropagation();
+          onMenu();
+        }}
+      >⋮</button>
+      {menuOpen && (
+        <div className="songMenu" onClick={(event) => event.stopPropagation()}>
+          <button onClick={onTogglePin}>{pinned ? "고정 해제" : "고정"}</button>
+          <button onClick={onEdit}>이름 수정</button>
+          <button className="danger" onClick={onDelete}>지우기</button>
+        </div>
+      )}
     </div>
   );
 }
@@ -1183,6 +1367,48 @@ function applyStemPalette(analysis: Analysis): Analysis {
       color: STEM_COLORS[stem.name] ?? stem.color
     }))
   };
+}
+
+function sortSongs(songList: LibrarySong[]) {
+  return [...songList].sort((first, second) => {
+    if (first.pinned !== second.pinned) return first.pinned ? -1 : 1;
+    const firstTime = Date.parse(first.job?.created_at ?? "");
+    const secondTime = Date.parse(second.job?.created_at ?? "");
+    if (Number.isFinite(firstTime) && Number.isFinite(secondTime) && firstTime !== secondTime) {
+      return secondTime - firstTime;
+    }
+    return first.title.localeCompare(second.title, "ko");
+  });
+}
+
+function readLibraryMetadata(): LibraryMetadata {
+  try {
+    const raw = window.localStorage.getItem(LIBRARY_STORAGE_KEY);
+    if (!raw) return { folders: [], songs: {} };
+    const parsed = JSON.parse(raw) as Partial<LibraryMetadata>;
+    return {
+      folders: Array.isArray(parsed.folders) ? parsed.folders : [],
+      songs: parsed.songs && typeof parsed.songs === "object" ? parsed.songs : {}
+    };
+  } catch {
+    return { folders: [], songs: {} };
+  }
+}
+
+function writeLibraryMetadata(folders: LibraryFolder[], songs: LibrarySong[]) {
+  const metadata: LibraryMetadata = {
+    folders,
+    songs: {}
+  };
+  for (const song of songs) {
+    const key = song.jobId ?? song.job?.id ?? song.id;
+    metadata.songs[key] = {
+      title: song.title,
+      folderId: song.folderId,
+      pinned: song.pinned
+    };
+  }
+  window.localStorage.setItem(LIBRARY_STORAGE_KEY, JSON.stringify(metadata));
 }
 
 function formatTime(seconds: number) {

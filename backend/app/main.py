@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -84,6 +85,27 @@ class JobStore:
                 return loaded
         raise HTTPException(status_code=404, detail="작업을 찾을 수 없습니다.")
 
+    async def list(self) -> list[JobState]:
+        async with self.lock:
+            states = list(self.jobs.values())
+            known = {state.id for state in states}
+            if JOBS_DIR.exists():
+                for job_path in JOBS_DIR.iterdir():
+                    if not job_path.is_dir() or job_path.name in known:
+                        continue
+                    loaded = self._read_state(job_path.name)
+                    if loaded:
+                        self.jobs[loaded.id] = loaded
+                        states.append(loaded)
+            return sorted(states, key=lambda state: state.created_at, reverse=True)
+
+    async def delete(self, job_id: str) -> None:
+        state = await self.get(job_id)
+        async with self.lock:
+            self.jobs.pop(job_id, None)
+        shutil.rmtree(Path(state.job_dir), ignore_errors=True)
+        shutil.rmtree(Path(state.source_path).parent, ignore_errors=True)
+
     async def update(self, state: JobState) -> None:
         state.updated_at = now_iso()
         async with self.lock:
@@ -156,10 +178,21 @@ async def create_job(file: Annotated[UploadFile, File(...)]) -> JobResponse:
     return public_job(state)
 
 
+@app.get("/api/jobs", response_model=list[JobResponse])
+async def list_jobs() -> list[JobResponse]:
+    states = await store.list()
+    return [public_job(state) for state in states]
+
+
 @app.get("/api/jobs/{job_id}", response_model=JobResponse)
 async def get_job(job_id: str) -> JobResponse:
     state = await store.get(job_id)
     return public_job(state)
+
+
+@app.delete("/api/jobs/{job_id}", status_code=204)
+async def delete_job(job_id: str) -> None:
+    await store.delete(job_id)
 
 
 @app.get("/api/jobs/{job_id}/analysis")
