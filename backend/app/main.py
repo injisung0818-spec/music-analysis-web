@@ -1,0 +1,181 @@
+from __future__ import annotations
+
+import asyncio
+import json
+import shutil
+import uuid
+from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import Annotated
+
+from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from pydantic import BaseModel
+
+from .processor import JobState, MusicProcessor, now_iso
+
+
+BASE_DIR = Path(__file__).resolve().parents[1]
+STORAGE_DIR = BASE_DIR / "storage"
+UPLOADS_DIR = STORAGE_DIR / "uploads"
+JOBS_DIR = STORAGE_DIR / "jobs"
+ALLOWED_SUFFIXES = {".mp3", ".wav"}
+
+
+class JobResponse(BaseModel):
+    id: str
+    status: str
+    progress: float
+    message: str
+    created_at: str
+    updated_at: str
+    original_filename: str
+    warnings: list[str] = []
+    error: str | None = None
+
+
+class JobStore:
+    def __init__(self) -> None:
+        self.jobs: dict[str, JobState] = {}
+        self.queue: asyncio.Queue[str] = asyncio.Queue()
+        self.lock = asyncio.Lock()
+
+    async def create(self, upload: UploadFile) -> JobState:
+        suffix = Path(upload.filename or "").suffix.lower()
+        if suffix not in ALLOWED_SUFFIXES:
+            raise HTTPException(status_code=400, detail="mp3와 wav 파일만 업로드할 수 있습니다.")
+
+        job_id = uuid.uuid4().hex
+        job_dir = JOBS_DIR / job_id
+        upload_dir = UPLOADS_DIR / job_id
+        job_dir.mkdir(parents=True, exist_ok=True)
+        upload_dir.mkdir(parents=True, exist_ok=True)
+
+        safe_name = Path(upload.filename or f"upload{suffix}").name
+        source_path = upload_dir / safe_name
+        with source_path.open("wb") as handle:
+            shutil.copyfileobj(upload.file, handle)
+
+        state = JobState(
+            id=job_id,
+            status="queued",
+            progress=0.0,
+            message="대기열에 추가됨",
+            created_at=now_iso(),
+            updated_at=now_iso(),
+            original_filename=safe_name,
+            source_path=str(source_path),
+            job_dir=str(job_dir),
+        )
+        async with self.lock:
+            self.jobs[job_id] = state
+            self._write_state(state)
+        await self.queue.put(job_id)
+        return state
+
+    async def get(self, job_id: str) -> JobState:
+        async with self.lock:
+            if job_id in self.jobs:
+                return self.jobs[job_id]
+            loaded = self._read_state(job_id)
+            if loaded:
+                self.jobs[job_id] = loaded
+                return loaded
+        raise HTTPException(status_code=404, detail="작업을 찾을 수 없습니다.")
+
+    async def update(self, state: JobState) -> None:
+        state.updated_at = now_iso()
+        async with self.lock:
+            self.jobs[state.id] = state
+            self._write_state(state)
+
+    def _write_state(self, state: JobState) -> None:
+        path = JOBS_DIR / state.id / "job.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(state.model_dump(), indent=2), encoding="utf-8")
+
+    def _read_state(self, job_id: str) -> JobState | None:
+        path = JOBS_DIR / job_id / "job.json"
+        if not path.exists():
+            return None
+        return JobState(**json.loads(path.read_text(encoding="utf-8")))
+
+
+store = JobStore()
+processor = MusicProcessor(store.update)
+
+
+async def worker() -> None:
+    while True:
+        job_id = await store.queue.get()
+        try:
+            state = await store.get(job_id)
+            await processor.process(state)
+        finally:
+            store.queue.task_done()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    STORAGE_DIR.mkdir(exist_ok=True)
+    UPLOADS_DIR.mkdir(exist_ok=True)
+    JOBS_DIR.mkdir(exist_ok=True)
+    task = asyncio.create_task(worker())
+    yield
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+
+app = FastAPI(title="Local Music Analysis MVP", lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+def public_job(state: JobState) -> JobResponse:
+    return JobResponse(**state.model_dump(exclude={"source_path", "job_dir"}))
+
+
+@app.get("/api/health")
+def health() -> dict[str, str]:
+    return {"status": "ok"}
+
+
+@app.post("/api/jobs", response_model=JobResponse)
+async def create_job(file: Annotated[UploadFile, File(...)]) -> JobResponse:
+    state = await store.create(file)
+    return public_job(state)
+
+
+@app.get("/api/jobs/{job_id}", response_model=JobResponse)
+async def get_job(job_id: str) -> JobResponse:
+    state = await store.get(job_id)
+    return public_job(state)
+
+
+@app.get("/api/jobs/{job_id}/analysis")
+async def get_analysis(job_id: str) -> dict:
+    state = await store.get(job_id)
+    analysis_path = Path(state.job_dir) / "analysis.json"
+    if state.status != "done" or not analysis_path.exists():
+        raise HTTPException(status_code=404, detail="분석 결과가 아직 준비되지 않았습니다.")
+    return json.loads(analysis_path.read_text(encoding="utf-8"))
+
+
+@app.get("/api/jobs/{job_id}/assets/{asset_path:path}")
+async def get_asset(job_id: str, asset_path: str) -> FileResponse:
+    state = await store.get(job_id)
+    root = Path(state.job_dir).resolve()
+    target = (root / asset_path).resolve()
+    if not target.is_file() or root not in target.parents:
+        raise HTTPException(status_code=404, detail="파일을 찾을 수 없습니다.")
+    return FileResponse(target)
