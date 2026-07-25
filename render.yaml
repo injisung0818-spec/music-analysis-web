@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: local-music-analysis-backend
+    runtime: docker
+    plan: starter
+    dockerfilePath: backend/Dockerfile
+    dockerContext: backend
+    healthCheckPath: /api/health
+    disk:
+      name: music-analysis-data
+      mountPath: /app/storage
+      sizeGB: 10
+    envVars:
+      - key: CORS_ORIGINS
+        value: https://your-netlify-site.netlify.app
+      - key: MUSIC_FAST_UPLOAD
+        value: "1"
+      - key: MUSIC_STEM_BITRATE
+        value: 80k

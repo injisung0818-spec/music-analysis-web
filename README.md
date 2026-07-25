@@ -66,6 +66,27 @@ npm run dev
 
 Open [http://localhost:5173](http://localhost:5173). The Vite dev server proxies `/api` to `http://localhost:8000`.
 
+## Deploy
+
+This app is best deployed as:
+
+- Frontend: Netlify
+- Backend: Render Docker web service
+
+Set the frontend environment variable:
+
+```bash
+VITE_API_BASE=https://your-backend-domain.onrender.com
+```
+
+Set the backend CORS origin:
+
+```bash
+CORS_ORIGINS=https://your-netlify-site.netlify.app
+```
+
+Render uses `backend/Dockerfile` and keeps uploaded jobs on a persistent disk mounted at `/app/storage`.
+
 ## Output Location
 
 Each upload creates:
