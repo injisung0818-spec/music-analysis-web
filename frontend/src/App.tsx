@@ -1431,11 +1431,38 @@ function stemPlaceholders() {
 function applyStemPalette(analysis: Analysis): Analysis {
   return {
     ...analysis,
+    chords: normalizeChordTimeline(analysis.chords, analysis.duration),
     stems: analysis.stems.map((stem) => ({
       ...stem,
       color: STEM_COLORS[stem.name] ?? stem.color
     }))
   };
+}
+
+function normalizeChordTimeline(chords: Analysis["chords"], duration: number) {
+  if (!duration || duration <= 0) return chords;
+  if (!chords.length) {
+    return [{ start: 0, end: duration, label: "N", confidence: 0 }];
+  }
+
+  const lastEnd = Math.max(...chords.map((chord) => chord.end));
+  const scale = lastEnd > 0 && lastEnd < duration * 0.6 ? duration / lastEnd : 1;
+  const fixed = chords
+    .map((chord) => ({
+      ...chord,
+      start: Math.max(0, Math.min(chord.start * scale, duration)),
+      end: Math.max(0, Math.min(chord.end * scale, duration))
+    }))
+    .filter((chord) => chord.end >= chord.start);
+
+  if (!fixed.length) {
+    return [{ start: 0, end: duration, label: "N", confidence: 0 }];
+  }
+
+  fixed[0] = { ...fixed[0], start: 0 };
+  const last = fixed[fixed.length - 1];
+  fixed[fixed.length - 1] = { ...last, end: duration };
+  return fixed;
 }
 
 async function fetchRestorableJobs(metadata: LibraryMetadata): Promise<JobResponse[]> {

@@ -29,6 +29,7 @@ KEY_NAMES = ["C", "C#", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B"]
 MAJOR_PROFILE = [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88]
 MINOR_PROFILE = [6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17]
 ANALYSIS_SAMPLE_RATE = 22050
+CHROMA_HOP_LENGTH = 2048
 
 
 def now_iso() -> str:
@@ -204,9 +205,9 @@ class MusicProcessor:
             tempo, beat_frames = librosa.beat.beat_track(y=y, sr=sr, units="frames")
             tempo_value = float(np.asarray(tempo).reshape(-1)[0]) if np.asarray(tempo).size else 120.0
             beat_times = librosa.frames_to_time(beat_frames, sr=sr).tolist()
-            chroma = librosa.feature.chroma_stft(y=y, sr=sr, hop_length=2048, n_fft=4096)
+            chroma = librosa.feature.chroma_stft(y=y, sr=sr, hop_length=CHROMA_HOP_LENGTH, n_fft=4096)
             key, mode = estimate_key(chroma)
-            chords = estimate_chords(chroma, sr, librosa)
+            chords = estimate_chords(chroma, sr, librosa, duration, CHROMA_HOP_LENGTH)
             mix_waveform = waveform_peaks(audio_wav)
             waveforms = {
                 stem: stem_waveform(stem, path, mix_waveform) if (path := stem_paths.get(stem)) else shaped_mix_waveform(stem, mix_waveform)
@@ -418,30 +419,32 @@ def estimate_key(chroma) -> tuple[str, str]:
     return key, mode
 
 
-def estimate_chords(chroma, sr: int, librosa) -> list[dict]:
+def estimate_chords(chroma, sr: int, librosa, duration: float, hop_length: int) -> list[dict]:
     import numpy as np
 
     frames = chroma.shape[1]
-    times = librosa.frames_to_time(np.arange(frames), sr=sr)
     if frames == 0:
         return []
+    times = librosa.frames_to_time(np.arange(frames), sr=sr, hop_length=hop_length)
     window_seconds = 2.0
     chords = []
     start = 0
     while start < frames:
-        end = min(frames, int(np.searchsorted(times, times[start] + window_seconds)))
+        start_time = float(times[start])
+        end_time = min(float(duration), start_time + window_seconds)
+        end = min(frames, int(np.searchsorted(times, end_time, side="right")))
         segment = np.mean(chroma[:, start:max(start + 1, end)], axis=1)
         label, confidence = estimate_chord_label(segment)
         chords.append(
             {
-                "start": round(float(times[start]), 3),
-                "end": round(float(times[min(max(end - 1, start), frames - 1)]), 3),
+                "start": round(min(float(duration), start_time), 3),
+                "end": round(max(start_time, end_time), 3),
                 "label": label,
                 "confidence": round(confidence, 3),
             }
         )
         start = max(end, start + 1)
-    return merge_adjacent_chords(chords)
+    return normalize_chords(merge_adjacent_chords(chords), duration)
 
 
 def estimate_chord_label(chroma_vector) -> tuple[str, float]:
@@ -470,6 +473,27 @@ def merge_adjacent_chords(chords: list[dict]) -> list[dict]:
         else:
             merged.append(chord)
     return merged[:120]
+
+
+def normalize_chords(chords: list[dict], duration: float) -> list[dict]:
+    if duration <= 0:
+        return chords
+    if not chords:
+        return [{"start": 0.0, "end": round(duration, 3), "label": "N", "confidence": 0.0}]
+
+    normalized: list[dict] = []
+    previous_end = 0.0
+    for chord in chords:
+        start = max(0.0, min(float(chord["start"]), duration))
+        end = max(start, min(float(chord["end"]), duration))
+        if normalized and start > previous_end:
+            normalized[-1]["end"] = round(start, 3)
+        normalized.append({**chord, "start": round(start, 3), "end": round(end, 3)})
+        previous_end = end
+
+    normalized[0]["start"] = 0.0
+    normalized[-1]["end"] = round(duration, 3)
+    return normalized
 
 
 def mock_chords(duration: float) -> list[dict]:
