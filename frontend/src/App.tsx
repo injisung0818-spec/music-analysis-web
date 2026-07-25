@@ -86,6 +86,19 @@ const MESSAGE_LABELS: Record<string, string> = {
   "Processing failed": "처리 실패"
 };
 
+type LibraryFolder = {
+  id: string;
+  name: string;
+  open: boolean;
+};
+
+type LibrarySong = {
+  id: string;
+  title: string;
+};
+
+type ModalView = "add" | "upload" | null;
+
 export default function App() {
   const [job, setJob] = useState<JobResponse | null>(null);
   const [analysis, setAnalysis] = useState<Analysis | null>(null);
@@ -98,6 +111,12 @@ export default function App() {
   const [profileOpen, setProfileOpen] = useState(false);
   const [volumeOpen, setVolumeOpen] = useState(false);
   const [songInfoOpen, setSongInfoOpen] = useState(false);
+  const [modalView, setModalView] = useState<ModalView>(null);
+  const [folders, setFolders] = useState<LibraryFolder[]>([]);
+  const [songs, setSongs] = useState<LibrarySong[]>([]);
+  const [activeSongId, setActiveSongId] = useState<string | null>(null);
+  const [editingFolderId, setEditingFolderId] = useState<string | null>(null);
+  const [uploadFileName, setUploadFileName] = useState("");
   const [metronomeOn, setMetronomeOn] = useState(false);
   const [chordsVisible, setChordsVisible] = useState(true);
   const [lyricsVisible, setLyricsVisible] = useState(false);
@@ -118,6 +137,7 @@ export default function App() {
   const transportKey = analysis ? `${analysis.key} ${modeLabel(analysis.mode)}` : "Cmin";
   const progress = Math.round((job?.progress ?? 0) * 100);
   const stems = analysis?.stems ?? stemPlaceholders();
+  const modalOpen = modalView !== null;
 
   useEffect(() => {
     if (!job || job.status === "done" || job.status === "error") return;
@@ -169,6 +189,12 @@ export default function App() {
     setAnalysis(null);
     setIsPlaying(false);
     setCurrentTime(0);
+    setSongInfoOpen(false);
+    setUploadFileName(file.name);
+    setModalView("upload");
+    const songId = createId();
+    setSongs((prev) => [...prev, { id: songId, title: file.name }]);
+    setActiveSongId(songId);
     try {
       const created = await uploadAudio(file);
       setJob(created);
@@ -227,6 +253,19 @@ export default function App() {
     setTracks((prev) => ({ ...prev, [name]: { ...prev[name], ...patch } }));
   }
 
+  function addFolder() {
+    const id = createId();
+    setFolders((prev) => [...prev, { id, name: "새로운 폴더", open: true }]);
+    setEditingFolderId(id);
+    setModalView(null);
+  }
+
+  function updateFolderName(id: string, name: string) {
+    const safeName = name.trim() || "새로운 폴더";
+    setFolders((prev) => prev.map((folder) => (folder.id === id ? { ...folder, name: safeName } : folder)));
+    setEditingFolderId(null);
+  }
+
   return (
     <main className="appShell">
       <header className="topBar">
@@ -276,19 +315,9 @@ export default function App() {
           </div>
           <div className="toolbarSpacer wide" aria-hidden="true" />
           <div className="toolbarGroup outputTools">
-            <button className="toolButton" data-tooltip="내보내기 메뉴" aria-label="내보내기 메뉴" onClick={() => setSongInfoOpen(true)}><Icon name="more" /></button>
-            <label className={`uploadIcon ${isDragging ? "dragging" : ""}`} data-tooltip="업로드" aria-label="업로드">
-              <input
-                type="file"
-                accept=".mp3,.wav,audio/mpeg,audio/wav"
-                onChange={(event) => {
-                  const file = event.target.files?.[0];
-                  if (file) void handleFile(file);
-                }}
-              />
-              <Icon name="upload" />
-            </label>
-            <button className="toolButton" data-tooltip="아무거나 추가기능" aria-label="아무거나 추가기능" onClick={() => setSongInfoOpen(true)}><Icon name="plus" /></button>
+            <button className="toolButton" data-tooltip="더보기" aria-label="더보기"><Icon name="more" /></button>
+            <button className="toolButton exportButton" data-tooltip="내보내기" aria-label="내보내기"><Icon name="upload" /></button>
+            <button className="toolButton" data-tooltip="추가" aria-label="추가" onClick={() => setModalView("add")}><Icon name="plus" /></button>
           </div>
         </div>
 
@@ -321,20 +350,28 @@ export default function App() {
         }}
       >
         {libraryOpen && <aside className="library">
-          <LibraryRow open={false} label="노래 폴더 1" />
-          <LibraryRow open={false} label="노래 폴더 2" />
-          <LibraryRow open label="노래 폴더 3" />
-          <SongRow label={analysis?.original_filename ?? "노래 1"} active={Boolean(analysis)} />
-          <SongRow label="노래 2" />
-          <SongRow label="노래 3" />
-          <div className="libraryStatus">
-            <span>{statusLabel(job?.status ?? "ready")}</span>
-            <strong>{progress}%</strong>
-            <div className="meterBar">
-              <div style={{ width: `${progress}%` }} />
-            </div>
-            <p>{messageLabel(job?.message) ?? "파일을 업로드하거나 화면에 드롭하세요"}</p>
-          </div>
+          {folders.map((folder) => (
+            <LibraryRow
+              key={folder.id}
+              open={folder.open}
+              label={folder.name}
+              editing={editingFolderId === folder.id}
+              onRename={(name) => updateFolderName(folder.id, name)}
+              onEdit={() => setEditingFolderId(folder.id)}
+              onToggle={() => setFolders((prev) => prev.map((item) => (item.id === folder.id ? { ...item, open: !item.open } : item)))}
+            />
+          ))}
+          {songs.map((song) => (
+            <SongRow
+              key={song.id}
+              label={song.title}
+              active={activeSongId === song.id}
+              onSelect={() => setActiveSongId(song.id)}
+            />
+          ))}
+          {!folders.length && !songs.length && (
+            <div className="emptyLibrary">오른쪽 + 버튼으로 폴더나 노래를 추가하세요</div>
+          )}
         </aside>}
 
         <section className="arranger">
@@ -387,6 +424,20 @@ export default function App() {
           ) : null}
         </section>
       </section>
+
+      {modalOpen && (
+        <ModalLayer
+          view={modalView}
+          fileName={uploadFileName}
+          job={job}
+          progress={progress}
+          error={error}
+          onClose={() => setModalView(null)}
+          onAddFolder={addFolder}
+          onOpenUpload={() => setModalView("upload")}
+          onFile={handleFile}
+        />
+      )}
     </main>
   );
 }
@@ -402,6 +453,7 @@ function Metric({ value, label }: { value: string; label: string }) {
 
 function Icon({ name }: { name: string }) {
   if (name === "stop") return <span className="uiIcon stopGlyph" aria-hidden="true" />;
+  if (name === "play") return <span className="uiIcon playGlyph" aria-hidden="true" />;
   if (name === "pause") return <span className="uiIcon pauseGlyph" aria-hidden="true" />;
   return <img className={`uiIcon ${name}`} src={TOOL_ICONS[name]} alt="" aria-hidden="true" />;
 }
@@ -479,18 +531,124 @@ function LyricsPanel({ title }: { title: string }) {
   );
 }
 
-function LibraryRow({ open, label }: { open: boolean; label: string }) {
+function ModalLayer({
+  view,
+  fileName,
+  job,
+  progress,
+  error,
+  onClose,
+  onAddFolder,
+  onOpenUpload,
+  onFile
+}: {
+  view: ModalView;
+  fileName: string;
+  job: JobResponse | null;
+  progress: number;
+  error: string | null;
+  onClose: () => void;
+  onAddFolder: () => void;
+  onOpenUpload: () => void;
+  onFile: (file: File) => void | Promise<void>;
+}) {
+  const status = statusLabel(job?.status ?? "ready");
+  const message = messageLabel(job?.message) ?? (fileName ? "파일 분석을 준비 중입니다" : "MP3 또는 WAV 파일을 선택하세요");
   return (
-    <div className="libraryFolder">
-      <span>{open ? "▼" : "▶"}</span>
-      <strong>{label}</strong>
+    <div className="modalOverlay" role="presentation">
+      {view === "add" && (
+        <section className="modalPanel addModal" role="dialog" aria-modal="true" aria-label="추가">
+          <button className="modalClose" aria-label="닫기" onClick={onClose}>×</button>
+          <strong>추가</strong>
+          <div className="addChoices">
+            <button onClick={onAddFolder}>
+              <span>폴더</span>
+              <small>새로운 폴더 생성</small>
+            </button>
+            <button onClick={onOpenUpload}>
+              <span>노래</span>
+              <small>MP3/WAV 업로드</small>
+            </button>
+          </div>
+        </section>
+      )}
+
+      {view === "upload" && (
+        <section className="modalPanel uploadModal" role="dialog" aria-modal="true" aria-label="노래 업로드">
+          <button className="modalClose" aria-label="닫기" onClick={onClose}>×</button>
+          <strong>노래 업로드</strong>
+          <label className="fileDropButton">
+            <input
+              type="file"
+              accept=".mp3,.wav,audio/mpeg,audio/wav"
+              onChange={(event) => {
+                const file = event.target.files?.[0];
+                event.currentTarget.value = "";
+                if (file) void onFile(file);
+              }}
+            />
+            <span>{fileName || "파일 선택"}</span>
+            <small>MP3 또는 WAV</small>
+          </label>
+          <div className="uploadStatus">
+            <span>{status}</span>
+            <strong>{progress}%</strong>
+            <div className="meterBar">
+              <div style={{ width: `${progress}%` }} />
+            </div>
+            <p>{error ?? job?.error ?? message}</p>
+          </div>
+        </section>
+      )}
     </div>
   );
 }
 
-function SongRow({ label, active = false }: { label: string; active?: boolean }) {
+function LibraryRow({
+  open,
+  label,
+  editing,
+  onRename,
+  onEdit,
+  onToggle
+}: {
+  open: boolean;
+  label: string;
+  editing: boolean;
+  onRename: (name: string) => void;
+  onEdit: () => void;
+  onToggle: () => void;
+}) {
+  const [draft, setDraft] = useState(label);
+
+  useEffect(() => {
+    setDraft(label);
+  }, [label, editing]);
+
   return (
-    <div className={`songRow ${active ? "active" : ""}`}>
+    <div className="libraryFolder" onDoubleClick={onEdit}>
+      <button aria-label={open ? "폴더 닫기" : "폴더 열기"} onClick={onToggle}>{open ? "▼" : "▶"}</button>
+      {editing ? (
+        <input
+          autoFocus
+          value={draft}
+          onChange={(event) => setDraft(event.target.value)}
+          onBlur={() => onRename(draft)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") onRename(draft);
+            if (event.key === "Escape") onRename(label);
+          }}
+        />
+      ) : (
+        <strong>{label}</strong>
+      )}
+    </div>
+  );
+}
+
+function SongRow({ label, active = false, onSelect }: { label: string; active?: boolean; onSelect: () => void }) {
+  return (
+    <div className={`songRow ${active ? "active" : ""}`} onClick={onSelect}>
       <span className="tinyWave">▥</span>
       <strong>{label}</strong>
       <button aria-label="더보기">⋮</button>
@@ -667,4 +825,9 @@ function formatTime(seconds: number) {
   const secs = Math.floor(safe % 60).toString().padStart(2, "0");
   const millis = Math.floor((safe % 1) * 100).toString().padStart(2, "0");
   return `${mins}:${secs}.${millis}`;
+}
+
+function createId() {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) return crypto.randomUUID();
+  return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
