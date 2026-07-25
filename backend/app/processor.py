@@ -29,8 +29,6 @@ KEY_NAMES = ["C", "C#", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B"]
 MAJOR_PROFILE = [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88]
 MINOR_PROFILE = [6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17]
 ANALYSIS_SAMPLE_RATE = 22050
-SILENT_PEAK_THRESHOLD = 0.003
-SILENT_RMS_THRESHOLD = 0.0001
 
 
 def now_iso() -> str:
@@ -84,28 +82,24 @@ class MusicProcessor:
             await self._set(state, "running", 0.76, "MIDI 추출 중")
 
             midi_paths = await self._extract_midi(stem_paths, midi_dir, state)
-            await self._set(state, "running", 0.86, "오디오 무손실 저장 중")
+            await self._set(state, "running", 0.86, "오디오 압축 저장 중")
 
-            asset_stem_paths, stored_silent_stems = await self._store_lossless_stems(stem_paths, state)
-            silent_stems = {stem for stem in STEMS if stem not in asset_stem_paths}
-            silent_stems.update(stored_silent_stems)
+            asset_stem_paths = await self._compress_stems(stem_paths, state)
             await self._set(state, "running", 0.92, "결과 저장 중")
 
             stem_assets = []
             for stem in STEMS:
                 stem_path = asset_stem_paths.get(stem)
                 midi_path = midi_paths.get(stem)
-                stem_asset = {
-                    "name": stem,
-                    "color": STEM_COLORS[stem],
-                    "audio_url": f"/api/jobs/{state.id}/assets/{stem_path.relative_to(job_dir)}" if stem_path else None,
-                    "midi_url": f"/api/jobs/{state.id}/assets/{midi_path.relative_to(job_dir)}" if midi_path else None,
-                    "waveform": analysis["waveforms"].get(stem, []),
-                    "silent": stem in silent_stems,
-                }
-                if stem in silent_stems:
-                    stem_asset["skipped_reason"] = "silent"
-                stem_assets.append(stem_asset)
+                stem_assets.append(
+                    {
+                        "name": stem,
+                        "color": STEM_COLORS[stem],
+                        "audio_url": f"/api/jobs/{state.id}/assets/{stem_path.relative_to(job_dir)}" if stem_path else None,
+                        "midi_url": f"/api/jobs/{state.id}/assets/{midi_path.relative_to(job_dir)}" if midi_path else None,
+                        "waveform": analysis["waveforms"].get(stem, []),
+                    }
+                )
 
             result = {
                 "job_id": state.id,
@@ -177,18 +171,13 @@ class MusicProcessor:
                 await asyncio.to_thread(self._run_command, cmd, "Demucs 스템 분리 실패")
                 model_dir = out_dir / "htdemucs_6s" / audio_wav.stem
                 paths = {}
-                found_outputs = 0
                 for stem in STEMS:
                     src = model_dir / f"{stem}.wav"
                     dst = stems_dir / f"{stem}.wav"
                     if src.exists():
-                        found_outputs += 1
-                        if is_silent_audio(src):
-                            state.warnings.append(f"{stem} stem이 거의 무음이라 파일 저장을 생략했습니다.")
-                            continue
                         shutil.copyfile(src, dst)
                         paths[stem] = dst
-                if found_outputs == len(STEMS):
+                if len(paths) == len(STEMS):
                     shutil.rmtree(out_dir, ignore_errors=True)
                     return paths
                 state.warnings.append("Demucs가 완료됐지만 6개 stem이 모두 생성되지 않아 fallback stems를 생성했습니다.")
@@ -199,12 +188,9 @@ class MusicProcessor:
             state.warnings.append("demucs 명령을 찾을 수 없어 실제 스템 분리 대신 fallback stems를 생성했습니다.")
 
         paths = {}
-        if is_silent_audio(audio_wav):
-            state.warnings.append("fallback 입력 오디오가 무음이라 other stem 파일 저장도 생략했습니다.")
-        else:
-            other_path = stems_dir / "other.wav"
-            shutil.copyfile(audio_wav, other_path)
-            paths["other"] = other_path
+        other_path = stems_dir / "other.wav"
+        shutil.copyfile(audio_wav, other_path)
+        paths["other"] = other_path
         state.warnings.append("저장 용량을 줄이기 위해 fallback 무음 stem 파일 생성을 생략했습니다.")
         return paths
 
@@ -290,26 +276,15 @@ class MusicProcessor:
             state.warnings.append(f"basic-pitch가 설치되어 있지 않거나 MIDI 추출에 실패해 placeholder MIDI 파일을 생성했습니다. 상세: {exc}")
             return write_placeholder_midis(midi_dir)
 
-    async def _store_lossless_stems(self, stem_paths: dict[str, Path], state: JobState) -> tuple[dict[str, Path], set[str]]:
-        kept_paths: dict[str, Path] = {}
-        silent_stems: set[str] = set()
-        for stem, path in stem_paths.items():
-            if is_silent_audio(path):
-                path.unlink(missing_ok=True)
-                silent_stems.add(stem)
-                state.warnings.append(f"{stem} stem이 거의 무음이라 파일 저장을 생략했습니다.")
-            else:
-                kept_paths[stem] = path
-
+    async def _compress_stems(self, stem_paths: dict[str, Path], state: JobState) -> dict[str, Path]:
         ffmpeg = find_executable("ffmpeg")
         if not ffmpeg:
-            if kept_paths:
-                state.warnings.append("ffmpeg가 없어 stem WAV를 FLAC으로 변환하지 않고 WAV로 저장했습니다.")
-            return kept_paths, silent_stems
+            state.warnings.append("ffmpeg가 없어 stem WAV를 압축하지 않고 저장했습니다.")
+            return stem_paths
 
-        stored: dict[str, Path] = {}
-        for stem, path in kept_paths.items():
-            target = path.with_suffix(".flac")
+        compressed: dict[str, Path] = {}
+        for stem, path in stem_paths.items():
+            target = path.with_suffix(".m4a")
             cmd = [
                 ffmpeg,
                 "-y",
@@ -321,23 +296,25 @@ class MusicProcessor:
                 str(path),
                 "-vn",
                 "-c:a",
-                "flac",
-                "-compression_level",
-                os.getenv("MUSIC_FLAC_COMPRESSION_LEVEL", "8"),
+                "aac",
+                "-b:a",
+                os.getenv("MUSIC_STEM_BITRATE", "96k"),
+                "-movflags",
+                "+faststart",
                 str(target),
             ]
             try:
-                await asyncio.to_thread(self._run_command, cmd, "stem FLAC 변환 실패")
+                await asyncio.to_thread(self._run_command, cmd, "stem 오디오 압축 실패")
                 if target.exists() and target.stat().st_size > 0:
                     path.unlink(missing_ok=True)
-                    stored[stem] = target
+                    compressed[stem] = target
                 else:
-                    stored[stem] = path
+                    compressed[stem] = path
             except Exception as exc:
-                state.warnings.append(f"{stem} stem FLAC 변환에 실패해 WAV로 저장했습니다. 상세: {exc}")
+                state.warnings.append(f"{stem} stem 압축에 실패해 WAV로 저장했습니다. 상세: {exc}")
                 target.unlink(missing_ok=True)
-                stored[stem] = path
-        return stored, silent_stems
+                compressed[stem] = path
+        return compressed
 
     def _run_command(self, cmd: list[str], error_message: str) -> None:
         completed = subprocess.run(cmd, capture_output=True, text=True, check=False)
@@ -399,63 +376,6 @@ def waveform_peaks(path: Path, points: int = 2400) -> list[float]:
         return [round(float(v), 4) for v in peaks[:points]]
     except Exception:
         return synthetic_waveform(points)
-
-
-def is_silent_audio(path: Path, peak_threshold: float = SILENT_PEAK_THRESHOLD, rms_threshold: float = SILENT_RMS_THRESHOLD) -> bool:
-    stats = audio_stats(path)
-    if not stats:
-        return False
-    peak, rms = stats
-    return peak <= peak_threshold or rms <= rms_threshold
-
-
-def audio_stats(path: Path) -> tuple[float, float] | None:
-    try:
-        import numpy as np
-        import soundfile as sf
-
-        peak = 0.0
-        square_sum = 0.0
-        sample_count = 0
-        with sf.SoundFile(str(path)) as audio:
-            while True:
-                chunk = audio.read(frames=65536, dtype="float32", always_2d=True)
-                if chunk.size == 0:
-                    break
-                absolute = np.abs(chunk)
-                peak = max(peak, float(absolute.max(initial=0.0)))
-                square_sum += float(np.square(chunk).sum())
-                sample_count += int(chunk.size)
-        if sample_count == 0:
-            return 0.0, 0.0
-        return peak, math.sqrt(square_sum / sample_count)
-    except Exception:
-        return wav_audio_stats(path)
-
-
-def wav_audio_stats(path: Path) -> tuple[float, float] | None:
-    try:
-        with wave.open(str(path), "rb") as handle:
-            if handle.getsampwidth() != 2:
-                return None
-            peak = 0.0
-            square_sum = 0.0
-            sample_count = 0
-            while True:
-                raw = handle.readframes(65536)
-                if not raw:
-                    break
-                samples = struct.unpack("<" + "h" * (len(raw) // 2), raw)
-                for sample in samples:
-                    value = abs(sample) / 32768
-                    peak = max(peak, value)
-                    square_sum += value * value
-                sample_count += len(samples)
-        if sample_count == 0:
-            return 0.0, 0.0
-        return peak, math.sqrt(square_sum / sample_count)
-    except Exception:
-        return None
 
 
 def synthetic_waveform(points: int) -> list[float]:

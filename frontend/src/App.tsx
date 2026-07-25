@@ -97,7 +97,6 @@ const MESSAGE_LABELS: Record<string, string> = {
   "Analyzing tempo, key, and chords": "템포, 키, 코드 분석 중",
   "Extracting MIDI": "MIDI 추출 중",
   "Compressing audio assets": "오디오 압축 저장 중",
-  "오디오 무손실 저장 중": "오디오 무손실 저장 중",
   "오디오 압축 저장 중": "오디오 압축 저장 중",
   "Writing results": "결과 저장 중",
   "Analysis complete": "분석 완료",
@@ -292,9 +291,6 @@ export default function App() {
 
   useEffect(() => {
     if (!analysis) return;
-    for (const stem of analysis.stems) {
-      if (!stem.audio_url) audioRefs.current[stem.name] = null;
-    }
     for (const stem of analysis.stems) {
       const audio = audioRefs.current[stem.name];
       if (!audio) continue;
@@ -852,7 +848,7 @@ export default function App() {
               ))}
             </div>
           </div>
-          {analysis?.stems.filter((stem) => stem.audio_url).map((stem) => (
+          {analysis?.stems.map((stem) => (
             <audio
               key={stem.name}
               ref={(node) => {
