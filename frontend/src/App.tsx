@@ -148,6 +148,7 @@ export default function App() {
   const [songs, setSongs] = useState<LibrarySong[]>([]);
   const [activeSongId, setActiveSongId] = useState<string | null>(null);
   const [editingFolderId, setEditingFolderId] = useState<string | null>(null);
+  const [openFolderMenuId, setOpenFolderMenuId] = useState<string | null>(null);
   const [editingSongId, setEditingSongId] = useState<string | null>(null);
   const [openSongMenuId, setOpenSongMenuId] = useState<string | null>(null);
   const [libraryLoaded, setLibraryLoaded] = useState(false);
@@ -184,6 +185,7 @@ export default function App() {
   const progress = Math.round((job?.progress ?? 0) * 100);
   const stems = analysis?.stems ?? stemPlaceholders();
   const orderedSongs = useMemo(() => sortSongs(songs), [songs]);
+  const activeSongTitle = songs.find((song) => song.id === activeSongId)?.title ?? analysis?.original_filename ?? "노래 이름";
   const modalOpen = modalView !== null;
   const displayDuration = duration || 120;
   const timelinePixelsPerSecond = analysis ? 16 : 22;
@@ -572,6 +574,13 @@ export default function App() {
     setEditingFolderId(null);
   }
 
+  function removeFolder(folderId: string) {
+    setOpenFolderMenuId(null);
+    setEditingFolderId(null);
+    setFolders((prev) => prev.filter((folder) => folder.id !== folderId));
+    setSongs((prev) => prev.map((song) => (song.folderId === folderId ? { ...song, folderId: null } : song)));
+  }
+
   function moveSongToFolder(songId: string, folderId: string | null) {
     setFolders((prev) => prev.map((folder) => (folder.id === folderId ? { ...folder, open: true } : folder)));
     setSongs((prev) => prev.map((song) => (song.id === songId ? { ...song, folderId } : song)));
@@ -605,7 +614,7 @@ export default function App() {
         </div>
 
         <div className="lcd" role="button" tabIndex={0} onClick={() => setSongInfoOpen((open) => !open)}>
-          <span className="songName">{analysis?.original_filename ?? "노래 이름"}</span>
+          <span className="songName">{activeSongTitle}</span>
           <Metric value={String(bar).padStart(3, "0")} label="BAR" />
           <Metric value={String(beat)} label="BEAT" />
           <Metric value={String(div)} label="DIV" />
@@ -653,6 +662,7 @@ export default function App() {
           repeatOn={repeatOn}
           globalVolume={globalVolume}
           onVolume={setGlobalVolume}
+          songTitle={activeSongTitle}
           analysis={analysis}
           job={job}
         />
@@ -707,8 +717,14 @@ export default function App() {
                 open={folder.open}
                 label={folder.name}
                 editing={editingFolderId === folder.id}
+                menuOpen={openFolderMenuId === folder.id}
                 onRename={(name) => updateFolderName(folder.id, name)}
-                onEdit={() => setEditingFolderId(folder.id)}
+                onEdit={() => {
+                  setEditingFolderId(folder.id);
+                  setOpenFolderMenuId(null);
+                }}
+                onDelete={() => removeFolder(folder.id)}
+                onMenu={() => setOpenFolderMenuId((openId) => (openId === folder.id ? null : folder.id))}
                 onToggle={() => setFolders((prev) => prev.map((item) => (item.id === folder.id ? { ...item, open: !item.open } : item)))}
               />
               {folder.open && orderedSongs.filter((song) => song.folderId === folder.id).map((song) => (
@@ -813,7 +829,7 @@ export default function App() {
             <span>{analysis ? `${formatTime(analysis.duration)} · ${analysis.chords.length}개 코드 · ${analysis.beats.length}개 비트` : "분석 결과 대기 중"}</span>
           </div>
           {chordsVisible && <ChordTimeline analysis={analysis} currentTime={currentTime} onSeek={seek} />}
-          {lyricsVisible && <LyricsPanel title={analysis?.original_filename ?? "노래 이름"} />}
+          {lyricsVisible && <LyricsPanel title={activeSongTitle} />}
           <div className="editorDetails">
             <span>BPM <strong>{analysis ? Math.round(analysis.bpm) : "--"}</strong></span>
             <span>KEY <strong>{analysis ? `${analysis.key} ${modeLabel(analysis.mode)}` : "--"}</strong></span>
@@ -873,6 +889,7 @@ function TopPopovers({
   repeatOn,
   globalVolume,
   onVolume,
+  songTitle,
   analysis,
   job
 }: {
@@ -884,6 +901,7 @@ function TopPopovers({
   repeatOn: boolean;
   globalVolume: number;
   onVolume: (value: number) => void;
+  songTitle: string;
   analysis: Analysis | null;
   job: JobResponse | null;
 }) {
@@ -918,7 +936,7 @@ function TopPopovers({
       )}
       {songInfoOpen && (
         <div className="popover infoPopover">
-          <strong>{analysis?.original_filename ?? "노래 정보"}</strong>
+          <strong>{songTitle}</strong>
           <span>{analysis ? `${formatTime(analysis.duration)} · ${Math.round(analysis.bpm)} BPM · ${analysis.key} ${modeLabel(analysis.mode)}` : statusLabel(job?.status ?? "ready")}</span>
           <small>메트로놈 {metronomeOn ? "켜짐" : "꺼짐"} · 연속 재생 {repeatOn ? "켜짐" : "꺼짐"}</small>
         </div>
@@ -1014,15 +1032,21 @@ function LibraryRow({
   open,
   label,
   editing,
+  menuOpen,
   onRename,
   onEdit,
+  onDelete,
+  onMenu,
   onToggle
 }: {
   open: boolean;
   label: string;
   editing: boolean;
+  menuOpen: boolean;
   onRename: (name: string) => void;
   onEdit: () => void;
+  onDelete: () => void;
+  onMenu: () => void;
   onToggle: () => void;
 }) {
   const [draft, setDraft] = useState(label);
@@ -1047,6 +1071,20 @@ function LibraryRow({
         />
       ) : (
         <strong>{label}</strong>
+      )}
+      <button
+        className="folderMenuButton"
+        aria-label="폴더 메뉴"
+        onClick={(event) => {
+          event.stopPropagation();
+          onMenu();
+        }}
+      >⋮</button>
+      {menuOpen && (
+        <div className="folderMenu" onClick={(event) => event.stopPropagation()}>
+          <button onClick={onEdit}>이름 수정</button>
+          <button className="danger" onClick={onDelete}>폴더 지우기</button>
+        </div>
       )}
     </div>
   );
