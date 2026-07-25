@@ -129,6 +129,9 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const audioRefs = useRef<Record<string, HTMLAudioElement | null>>({});
   const rafRef = useRef<number | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const metronomeBeatRef = useRef(-1);
+  const currentTimeRef = useRef(0);
   const controlsScrollRef = useRef<HTMLDivElement | null>(null);
   const lanesScrollRef = useRef<HTMLDivElement | null>(null);
   const rulerScrollRef = useRef<HTMLDivElement | null>(null);
@@ -154,6 +157,10 @@ export default function App() {
     "--controls-width": `${trackControlsWidth}px`,
     "--editor-height": `${editorHeight}px`
   } as CSSProperties;
+
+  useEffect(() => {
+    currentTimeRef.current = currentTime;
+  }, [currentTime]);
 
   useEffect(() => {
     if (!job || job.status === "done" || job.status === "error") return;
@@ -199,6 +206,26 @@ export default function App() {
       audio.loop = repeatOn;
     }
   }, [tracks, soloActive, analysis, globalVolume, repeatOn]);
+
+  useEffect(() => {
+    if (!isPlaying || !metronomeOn || !analysis) {
+      metronomeBeatRef.current = -1;
+      return;
+    }
+
+    const timer = window.setInterval(() => {
+      const audio = firstPlayableAudio();
+      const time = audio?.currentTime ?? currentTimeRef.current;
+      const beatIndex = Math.floor(time / beatLength);
+      const beatRemainder = time % beatLength;
+      if (beatIndex !== metronomeBeatRef.current && beatRemainder < 0.08) {
+        metronomeBeatRef.current = beatIndex;
+        playMetronomeClick(beatIndex % 4 === 0);
+      }
+    }, 20);
+
+    return () => window.clearInterval(timer);
+  }, [analysis, beatLength, isPlaying, metronomeOn]);
 
   useEffect(() => {
     if (!isPlaying || !lanesScrollRef.current || !rulerScrollRef.current) return;
@@ -249,6 +276,10 @@ export default function App() {
     if (!analysis) return;
     const nextPlaying = !isPlaying;
     setIsPlaying(nextPlaying);
+    if (nextPlaying && metronomeOn) {
+      void ensureAudioContext()?.resume();
+      metronomeBeatRef.current = -1;
+    }
     const audible = analysis.stems
       .map((stem) => audioRefs.current[stem.name])
       .filter((audio): audio is HTMLAudioElement => Boolean(audio));
@@ -284,6 +315,30 @@ export default function App() {
 
   function updateTrack(name: StemName, patch: Partial<TrackState>) {
     setTracks((prev) => ({ ...prev, [name]: { ...prev[name], ...patch } }));
+  }
+
+  function ensureAudioContext() {
+    if (audioContextRef.current) return audioContextRef.current;
+    const AudioContextCtor = window.AudioContext ?? (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!AudioContextCtor) return null;
+    audioContextRef.current = new AudioContextCtor();
+    return audioContextRef.current;
+  }
+
+  function playMetronomeClick(accent: boolean) {
+    const context = ensureAudioContext();
+    if (!context) return;
+    const start = context.currentTime;
+    const oscillator = context.createOscillator();
+    const gain = context.createGain();
+    oscillator.type = "square";
+    oscillator.frequency.value = accent ? 1480 : 940;
+    gain.gain.setValueAtTime(accent ? 0.18 : 0.12, start);
+    gain.gain.exponentialRampToValueAtTime(0.001, start + 0.055);
+    oscillator.connect(gain);
+    gain.connect(context.destination);
+    oscillator.start(start);
+    oscillator.stop(start + 0.06);
   }
 
   function syncVerticalScroll(source: "controls" | "lanes") {
@@ -392,7 +447,19 @@ export default function App() {
 
         <div className="toolbarTail">
           <div className="toolbarGroup analysisTools">
-            <button className={`toolButton ${metronomeOn ? "active" : ""}`} data-tooltip="메트로놈" aria-label="메트로놈" onClick={() => setMetronomeOn((on) => !on)}><Icon name="metronome" /></button>
+            <button
+              className={`toolButton ${metronomeOn ? "active" : ""}`}
+              data-tooltip="메트로놈"
+              aria-label="메트로놈"
+              onClick={() => {
+                const next = !metronomeOn;
+                setMetronomeOn(next);
+                if (next) {
+                  void ensureAudioContext()?.resume();
+                  metronomeBeatRef.current = -1;
+                }
+              }}
+            ><Icon name="metronome" /></button>
             <button className={`toolButton ${chordsVisible ? "active" : ""}`} data-tooltip="코드 보기" aria-label="코드 보기" onClick={() => setChordsVisible((visible) => !visible)}><Icon name="notes" /></button>
           </div>
           <div className="toolbarGroup lyricTools">
