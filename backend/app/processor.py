@@ -205,9 +205,19 @@ class MusicProcessor:
             tempo, beat_frames = librosa.beat.beat_track(y=y, sr=sr, units="frames")
             tempo_value = float(np.asarray(tempo).reshape(-1)[0]) if np.asarray(tempo).size else 120.0
             beat_times = librosa.frames_to_time(beat_frames, sr=sr).tolist()
-            chroma = librosa.feature.chroma_stft(y=y, sr=sr, hop_length=CHROMA_HOP_LENGTH, n_fft=4096)
+            try:
+                harmonic = librosa.effects.harmonic(y)
+                chroma = librosa.feature.chroma_cqt(
+                    y=harmonic,
+                    sr=sr,
+                    hop_length=CHROMA_HOP_LENGTH,
+                    bins_per_octave=36,
+                )
+            except Exception:
+                chroma = librosa.feature.chroma_stft(y=y, sr=sr, hop_length=CHROMA_HOP_LENGTH, n_fft=4096)
+            chroma = normalize_chroma(chroma)
             key, mode = estimate_key(chroma)
-            chords = estimate_chords(chroma, sr, librosa, duration, CHROMA_HOP_LENGTH)
+            chords = estimate_chords(chroma, sr, librosa, duration, CHROMA_HOP_LENGTH, beat_times)
             mix_waveform = waveform_peaks(audio_wav)
             waveforms = {
                 stem: stem_waveform(stem, path, mix_waveform) if (path := stem_paths.get(stem)) else shaped_mix_waveform(stem, mix_waveform)
@@ -419,20 +429,26 @@ def estimate_key(chroma) -> tuple[str, str]:
     return key, mode
 
 
-def estimate_chords(chroma, sr: int, librosa, duration: float, hop_length: int) -> list[dict]:
+def normalize_chroma(chroma):
+    import numpy as np
+
+    chroma = np.asarray(chroma, dtype=float)
+    column_max = np.max(chroma, axis=0, keepdims=True)
+    return chroma / np.maximum(column_max, 1e-9)
+
+
+def estimate_chords(chroma, sr: int, librosa, duration: float, hop_length: int, beat_times: list[float] | None = None) -> list[dict]:
     import numpy as np
 
     frames = chroma.shape[1]
     if frames == 0:
         return []
     times = librosa.frames_to_time(np.arange(frames), sr=sr, hop_length=hop_length)
-    window_seconds = 2.0
+    boundaries = chord_boundaries(duration, beat_times)
     chords = []
-    start = 0
-    while start < frames:
-        start_time = float(times[start])
-        end_time = min(float(duration), start_time + window_seconds)
-        end = min(frames, int(np.searchsorted(times, end_time, side="right")))
+    for start_time, end_time in zip(boundaries, boundaries[1:]):
+        start = int(np.searchsorted(times, start_time, side="left"))
+        end = int(np.searchsorted(times, end_time, side="right"))
         segment = np.mean(chroma[:, start:max(start + 1, end)], axis=1)
         label, confidence = estimate_chord_label(segment)
         chords.append(
@@ -443,25 +459,71 @@ def estimate_chords(chroma, sr: int, librosa, duration: float, hop_length: int) 
                 "confidence": round(confidence, 3),
             }
         )
-        start = max(end, start + 1)
-    return normalize_chords(merge_adjacent_chords(chords), duration)
+    return normalize_chords(merge_adjacent_chords(smooth_chords(chords)), duration)
+
+
+def chord_boundaries(duration: float, beat_times: list[float] | None) -> list[float]:
+    if duration <= 0:
+        return [0.0]
+    beats = sorted({round(float(t), 3) for t in beat_times or [] if 0 < float(t) < duration})
+    if len(beats) >= 4:
+        return [0.0, *beats, round(duration, 3)]
+
+    step = 1.0
+    boundaries = [0.0]
+    current = step
+    while current < duration:
+        boundaries.append(round(current, 3))
+        current += step
+    boundaries.append(round(duration, 3))
+    return boundaries
 
 
 def estimate_chord_label(chroma_vector) -> tuple[str, float]:
     import numpy as np
 
-    major_template = np.array([1, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0], dtype=float)
-    minor_template = np.array([1, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0], dtype=float)
+    templates = {
+        "": [1, 0, 0, 0, 0.82, 0, 0, 0.9, 0, 0, 0, 0],
+        "m": [1, 0, 0, 0.82, 0, 0, 0, 0.9, 0, 0, 0, 0],
+        "7": [1, 0, 0, 0, 0.78, 0, 0, 0.84, 0, 0, 0.62, 0],
+        "m7": [1, 0, 0, 0.78, 0, 0, 0, 0.84, 0, 0, 0.62, 0],
+        "maj7": [1, 0, 0, 0, 0.78, 0, 0, 0.84, 0, 0, 0, 0.62],
+        "sus4": [1, 0, 0, 0, 0, 0.72, 0, 0.84, 0, 0, 0, 0],
+        "dim": [1, 0, 0, 0.76, 0, 0, 0.72, 0, 0, 0, 0, 0],
+    }
     vector = np.asarray(chroma_vector, dtype=float)
-    if vector.max() > 0:
-        vector = vector / vector.max()
+    norm = np.linalg.norm(vector)
+    if norm <= 1e-9:
+        return "N", 0.0
+    vector = vector / norm
     best = (-1.0, "N")
+    extension_penalty = {"7": 0.07, "m7": 0.07, "maj7": 0.07, "sus4": 0.035, "dim": 0.035}
     for i, name in enumerate(KEY_NAMES):
-        maj = float(np.dot(vector, np.roll(major_template, i)))
-        min_score = float(np.dot(vector, np.roll(minor_template, i)))
-        best = max(best, (maj, name), (min_score, f"{name}m"), key=lambda item: item[0])
-    confidence = min(1.0, max(0.0, best[0] / 3.0))
+        for suffix, template in templates.items():
+            template_vector = np.roll(np.array(template, dtype=float), i)
+            template_vector = template_vector / np.linalg.norm(template_vector)
+            label = f"{name}{suffix}"
+            score = float(np.dot(vector, template_vector)) - extension_penalty.get(suffix, 0.0)
+            best = max(best, (score, label), key=lambda item: item[0])
+    confidence = min(1.0, max(0.0, best[0]))
+    if confidence < 0.5:
+        return "N", confidence
     return best[1], confidence
+
+
+def smooth_chords(chords: list[dict]) -> list[dict]:
+    if len(chords) < 3:
+        return chords
+    smoothed = [dict(chord) for chord in chords]
+    for index in range(1, len(chords) - 1):
+        previous_label = smoothed[index - 1]["label"]
+        next_label = chords[index + 1]["label"]
+        current = smoothed[index]
+        duration = float(current["end"]) - float(current["start"])
+        if previous_label == next_label and current["label"] != previous_label and (duration < 0.9 or current["confidence"] < 0.62):
+            current["label"] = previous_label
+            current["confidence"] = round((current["confidence"] + smoothed[index - 1]["confidence"]) / 2, 3)
+    return smoothed
 
 
 def merge_adjacent_chords(chords: list[dict]) -> list[dict]:
