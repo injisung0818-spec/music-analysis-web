@@ -205,28 +205,8 @@ export default function App() {
     async function restoreLibrary() {
       const metadata = readLibraryMetadata();
       try {
-        const jobs = await fetchJobs();
-        const restoredSongs = await Promise.all(jobs.map(async (storedJob) => {
-          const meta = metadata.songs[storedJob.id] ?? {};
-          let restoredAnalysis: Analysis | null = null;
-          if (storedJob.status === "done") {
-            try {
-              restoredAnalysis = applyStemPalette(await fetchAnalysis(storedJob.id));
-            } catch {
-              restoredAnalysis = null;
-            }
-          }
-          return {
-            id: storedJob.id,
-            jobId: storedJob.id,
-            title: meta.title ?? storedJob.original_filename,
-            folderId: meta.folderId ?? null,
-            pinned: meta.pinned ?? false,
-            job: storedJob,
-            analysis: restoredAnalysis,
-            error: storedJob.error ?? null
-          };
-        }));
+        const jobs = await fetchRestorableJobs(metadata);
+        const restoredSongs = await Promise.all(jobs.map((storedJob) => restoreSong(storedJob, metadata)));
         if (!mounted) return;
         const nextSongs = sortSongs(restoredSongs);
         const firstSong = nextSongs[0] ?? null;
@@ -1366,6 +1346,43 @@ function applyStemPalette(analysis: Analysis): Analysis {
       ...stem,
       color: STEM_COLORS[stem.name] ?? stem.color
     }))
+  };
+}
+
+async function fetchRestorableJobs(metadata: LibraryMetadata): Promise<JobResponse[]> {
+  try {
+    return await fetchJobs();
+  } catch (listError) {
+    const savedJobIds = Object.keys(metadata.songs);
+    if (!savedJobIds.length) throw listError;
+    const restored = await Promise.allSettled(savedJobIds.map((jobId) => fetchJob(jobId)));
+    const jobs = restored
+      .filter((result): result is PromiseFulfilledResult<JobResponse> => result.status === "fulfilled")
+      .map((result) => result.value);
+    if (!jobs.length) throw listError;
+    return jobs;
+  }
+}
+
+async function restoreSong(storedJob: JobResponse, metadata: LibraryMetadata): Promise<LibrarySong> {
+  const meta = metadata.songs[storedJob.id] ?? {};
+  let restoredAnalysis: Analysis | null = null;
+  if (storedJob.status === "done") {
+    try {
+      restoredAnalysis = applyStemPalette(await fetchAnalysis(storedJob.id));
+    } catch {
+      restoredAnalysis = null;
+    }
+  }
+  return {
+    id: storedJob.id,
+    jobId: storedJob.id,
+    title: meta.title ?? storedJob.original_filename,
+    folderId: meta.folderId ?? null,
+    pinned: meta.pinned ?? false,
+    job: storedJob,
+    analysis: restoredAnalysis,
+    error: storedJob.error ?? null
   };
 }
 
