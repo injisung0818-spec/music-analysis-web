@@ -96,6 +96,8 @@ const MESSAGE_LABELS: Record<string, string> = {
   "Separating stems": "스템 분리 중",
   "Analyzing tempo, key, and chords": "템포, 키, 코드 분석 중",
   "Extracting MIDI": "MIDI 추출 중",
+  "Compressing audio assets": "오디오 압축 저장 중",
+  "오디오 압축 저장 중": "오디오 압축 저장 중",
   "Writing results": "결과 저장 중",
   "Analysis complete": "분석 완료",
   "Processing failed": "처리 실패"
@@ -115,6 +117,7 @@ type LibrarySong = {
   title: string;
   folderId: string | null;
   pinned: boolean;
+  restoring: boolean;
   job: JobResponse | null;
   analysis: Analysis | null;
   error: string | null;
@@ -206,6 +209,12 @@ export default function App() {
 
     async function restoreLibrary() {
       const metadata = readLibraryMetadata();
+      const loadingSongs = metadataSongsToLoadingRows(metadata);
+      if (mounted && loadingSongs.length) {
+        setFolders(metadata.folders);
+        setSongs(loadingSongs);
+        setActiveSongId(loadingSongs[0]?.id ?? null);
+      }
       try {
         const jobs = await fetchRestorableJobs(metadata);
         const restoredSongs = await Promise.all(jobs.map((storedJob) => restoreSong(storedJob, metadata)));
@@ -340,7 +349,7 @@ export default function App() {
     setUploadFileName(file.name);
     setModalView("upload");
     const songId = createId();
-    setSongs((prev) => sortSongs([...prev, { id: songId, jobId: null, title: file.name, folderId: null, pinned: false, job: null, analysis: null, error: null }]));
+    setSongs((prev) => sortSongs([...prev, { id: songId, jobId: null, title: file.name, folderId: null, pinned: false, restoring: false, job: null, analysis: null, error: null }]));
     setActiveSongId(songId);
     try {
       const created = await uploadAudio(file);
@@ -733,6 +742,7 @@ export default function App() {
                   id={song.id}
                   label={song.title}
                   pinned={song.pinned}
+                  loading={song.restoring}
                   nested
                   active={activeSongId === song.id}
                   editing={editingSongId === song.id}
@@ -756,6 +766,7 @@ export default function App() {
               id={song.id}
               label={song.title}
               pinned={song.pinned}
+              loading={song.restoring}
               active={activeSongId === song.id}
               editing={editingSongId === song.id}
               menuOpen={openSongMenuId === song.id}
@@ -1094,6 +1105,7 @@ function SongRow({
   id,
   label,
   pinned = false,
+  loading = false,
   active = false,
   nested = false,
   editing = false,
@@ -1108,6 +1120,7 @@ function SongRow({
   id: string;
   label: string;
   pinned?: boolean;
+  loading?: boolean;
   active?: boolean;
   nested?: boolean;
   editing?: boolean;
@@ -1127,10 +1140,10 @@ function SongRow({
 
   return (
     <div
-      className={`songRow ${active ? "active" : ""} ${nested ? "nested" : ""} ${pinned ? "pinned" : ""}`}
-      draggable
+      className={`songRow ${active ? "active" : ""} ${nested ? "nested" : ""} ${pinned ? "pinned" : ""} ${loading ? "loading" : ""}`}
+      draggable={!loading}
       onClick={() => {
-        if (!editing) onSelect();
+        if (!editing && !loading) onSelect();
       }}
       onDragStart={(event) => {
         event.dataTransfer.setData("application/x-song-id", id);
@@ -1152,11 +1165,12 @@ function SongRow({
           }}
         />
       ) : (
-        <strong>{pinned ? "● " : ""}{label}</strong>
+        <strong>{loading ? "불러오는중" : `${pinned ? "● " : ""}${label}`}</strong>
       )}
       <button
         aria-label="노래 메뉴"
         className="songMenuButton"
+        disabled={loading}
         onClick={(event) => {
           event.stopPropagation();
           onMenu();
@@ -1363,6 +1377,12 @@ function translateWarning(warning: string) {
   if (warning.includes("빠른 업로드 모드로 basic-pitch MIDI 추출을 건너뛰고")) {
     return "빠른 업로드 모드로 MIDI 추출을 건너뛰고 placeholder MIDI 파일을 생성했습니다.";
   }
+  if (warning.includes("ffmpeg가 없어 stem WAV를 압축하지 않고 저장했습니다")) {
+    return "ffmpeg가 없어 stem WAV를 압축하지 않고 저장했습니다.";
+  }
+  if (warning.includes("stem 압축에 실패해 WAV로 저장했습니다")) {
+    return "일부 stem 압축에 실패해 WAV로 저장했습니다.";
+  }
   return warning;
 }
 
@@ -1418,6 +1438,7 @@ async function restoreSong(storedJob: JobResponse, metadata: LibraryMetadata): P
     title: meta.title ?? storedJob.original_filename,
     folderId: meta.folderId ?? null,
     pinned: meta.pinned ?? false,
+    restoring: false,
     job: storedJob,
     analysis: restoredAnalysis,
     error: storedJob.error ?? null
@@ -1448,6 +1469,20 @@ function readLibraryMetadata(): LibraryMetadata {
   } catch {
     return { folders: [], songs: {} };
   }
+}
+
+function metadataSongsToLoadingRows(metadata: LibraryMetadata): LibrarySong[] {
+  return sortSongs(Object.entries(metadata.songs).map(([jobId, meta]) => ({
+    id: jobId,
+    jobId,
+    title: meta.title ?? "불러오는중",
+    folderId: meta.folderId ?? null,
+    pinned: meta.pinned ?? false,
+    restoring: true,
+    job: null,
+    analysis: null,
+    error: null
+  })));
 }
 
 function writeLibraryMetadata(folders: LibraryFolder[], songs: LibrarySong[]) {

@@ -822,6 +822,38 @@ button {
   color: #ffffff;
 }
 
+.songRow.loading {
+  color: #b9cbd0;
+  cursor: default;
+}
+
+.songRow.loading .tinyWave {
+  opacity: 0.55;
+}
+
+.songRow.loading strong::after {
+  content: "";
+  display: inline-block;
+  width: 18px;
+  height: 1em;
+  margin-left: 3px;
+  vertical-align: -2px;
+  background: linear-gradient(90deg, currentColor 0 3px, transparent 3px 7px, currentColor 7px 10px, transparent 10px 14px, currentColor 14px 17px);
+  animation: loadingDots 1s steps(3, end) infinite;
+}
+
+@keyframes loadingDots {
+  0% {
+    clip-path: inset(0 14px 0 0);
+  }
+  50% {
+    clip-path: inset(0 7px 0 0);
+  }
+  100% {
+    clip-path: inset(0 0 0 0);
+  }
+}
+
 .songRow button {
   height: 32px;
   border: 0;
@@ -829,6 +861,11 @@ button {
   color: #d9d9d9;
   font-size: 25px;
   cursor: pointer;
+}
+
+.songRow button:disabled {
+  opacity: 0.35;
+  cursor: default;
 }
 
 .songMenuButton {

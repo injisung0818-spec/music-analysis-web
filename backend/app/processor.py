@@ -81,11 +81,14 @@ class MusicProcessor:
             await self._set(state, "running", 0.76, "MIDI 추출 중")
 
             midi_paths = await self._extract_midi(stem_paths, midi_dir, state)
-            await self._set(state, "running", 0.9, "결과 저장 중")
+            await self._set(state, "running", 0.86, "오디오 압축 저장 중")
+
+            asset_stem_paths = await self._compress_stems(stem_paths, state)
+            await self._set(state, "running", 0.92, "결과 저장 중")
 
             stem_assets = []
             for stem in STEMS:
-                stem_path = stem_paths.get(stem)
+                stem_path = asset_stem_paths.get(stem)
                 midi_path = midi_paths.get(stem)
                 stem_assets.append(
                     {
@@ -111,6 +114,7 @@ class MusicProcessor:
                 "generated_at": now_iso(),
             }
             (job_dir / "analysis.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
+            cleanup_intermediates(source, converted, stems_dir)
             await self._set(state, "done", 1.0, "분석 완료")
         except Exception as exc:
             state.error = str(exc)
@@ -173,10 +177,12 @@ class MusicProcessor:
                         shutil.copyfile(src, dst)
                         paths[stem] = dst
                 if len(paths) == len(STEMS):
+                    shutil.rmtree(out_dir, ignore_errors=True)
                     return paths
                 state.warnings.append("Demucs가 완료됐지만 6개 stem이 모두 생성되지 않아 fallback stems를 생성했습니다.")
             except Exception as exc:
                 state.warnings.append(f"Demucs 실행에 실패해 fallback stems를 생성했습니다. 상세: {exc}")
+            shutil.rmtree(out_dir, ignore_errors=True)
         else:
             state.warnings.append("demucs 명령을 찾을 수 없어 실제 스템 분리 대신 fallback stems를 생성했습니다.")
 
@@ -266,6 +272,46 @@ class MusicProcessor:
         except Exception as exc:
             state.warnings.append(f"basic-pitch가 설치되어 있지 않거나 MIDI 추출에 실패해 placeholder MIDI 파일을 생성했습니다. 상세: {exc}")
             return write_placeholder_midis(midi_dir)
+
+    async def _compress_stems(self, stem_paths: dict[str, Path], state: JobState) -> dict[str, Path]:
+        ffmpeg = find_executable("ffmpeg")
+        if not ffmpeg:
+            state.warnings.append("ffmpeg가 없어 stem WAV를 압축하지 않고 저장했습니다.")
+            return stem_paths
+
+        compressed: dict[str, Path] = {}
+        for stem, path in stem_paths.items():
+            target = path.with_suffix(".m4a")
+            cmd = [
+                ffmpeg,
+                "-y",
+                "-nostdin",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-i",
+                str(path),
+                "-vn",
+                "-c:a",
+                "aac",
+                "-b:a",
+                os.getenv("MUSIC_STEM_BITRATE", "96k"),
+                "-movflags",
+                "+faststart",
+                str(target),
+            ]
+            try:
+                await asyncio.to_thread(self._run_command, cmd, "stem 오디오 압축 실패")
+                if target.exists() and target.stat().st_size > 0:
+                    path.unlink(missing_ok=True)
+                    compressed[stem] = target
+                else:
+                    compressed[stem] = path
+            except Exception as exc:
+                state.warnings.append(f"{stem} stem 압축에 실패해 WAV로 저장했습니다. 상세: {exc}")
+                target.unlink(missing_ok=True)
+                compressed[stem] = path
+        return compressed
 
     def _run_command(self, cmd: list[str], error_message: str) -> None:
         completed = subprocess.run(cmd, capture_output=True, text=True, check=False)
@@ -459,6 +505,14 @@ def write_placeholder_midis(midi_dir: Path) -> dict[str, Path]:
         write_minimal_midi(target, stem)
         midi_paths[stem] = target
     return midi_paths
+
+
+def cleanup_intermediates(source: Path, converted: Path, stems_dir: Path) -> None:
+    converted.unlink(missing_ok=True)
+    source.unlink(missing_ok=True)
+    if source.parent.exists() and not any(source.parent.iterdir()):
+        source.parent.rmdir()
+    shutil.rmtree(stems_dir / "_demucs", ignore_errors=True)
 
 
 def write_var_len(value: int) -> bytes:
