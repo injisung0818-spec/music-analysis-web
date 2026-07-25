@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, MouseEvent as ReactMouseEvent } from "react";
 import { assetUrl, deleteJob, fetchAnalysis, fetchJob, fetchJobs, uploadAudio } from "./api";
-import type { Analysis, Chord, JobResponse, StemName, TrackState } from "./types";
+import type { Analysis, JobResponse, StemName, TrackState } from "./types";
 import iconBass from "./assets/figma-icons/bass.svg";
 import iconDrums from "./assets/figma-icons/drums.svg";
 import iconExport from "./assets/figma-icons/export.svg";
@@ -845,7 +845,6 @@ export default function App() {
                   key={stem.name}
                   color={stem.color}
                   waveform={stem.waveform}
-                  silent={stem.silent || !stem.audio_url}
                   duration={displayDuration}
                   currentTime={currentTime}
                   onSeek={seek}
@@ -1297,21 +1296,18 @@ function TrackControlsRow({
 function RegionLane({
   color,
   waveform,
-  silent,
   duration,
   currentTime,
   onSeek
 }: {
   color: string;
   waveform: number[];
-  silent?: boolean;
   duration: number;
   currentTime: number;
   onSeek: (time: number) => void;
 }) {
-  const peaks = !silent && waveform.length ? resamplePeaks(waveform, Math.max(500, Math.min(3600, Math.round(duration * 9)))) : [];
-  const hasAudibleWave = !silent && peaks.some((peak) => peak > 0.003);
-  const wavePath = hasAudibleWave ? buildWavePath(peaks) : "";
+  const peaks = waveform.length ? resamplePeaks(waveform, Math.max(500, Math.min(3600, Math.round(duration * 9)))) : [];
+  const wavePath = peaks.length ? buildWavePath(peaks) : "";
   return (
     <div
       className="regionLane"
@@ -1322,14 +1318,14 @@ function RegionLane({
       }}
     >
       <div className="region">
-        <div className={`regionWave ${hasAudibleWave ? "" : "empty"}`}>
-          {hasAudibleWave ? (
+        <div className={`regionWave ${peaks.length ? "" : "empty"}`}>
+          {peaks.length ? (
             <svg className="waveSvg" viewBox="0 0 1000 100" preserveAspectRatio="none" aria-hidden="true">
               <line x1="0" x2="1000" y1="50" y2="50" />
               <path d={wavePath} />
             </svg>
           ) : (
-            <small>무음</small>
+            <small>분석 대기 중</small>
           )}
         </div>
       </div>
@@ -1340,12 +1336,12 @@ function RegionLane({
 
 function ChordTimeline({ analysis, currentTime, onSeek }: { analysis: Analysis | null; currentTime: number; onSeek: (time: number) => void }) {
   const duration = analysis?.duration ?? 30;
-  const chords = fillChordTimeline(duration, analysis?.chords ?? [
+  const chords = analysis?.chords ?? [
     { start: 0, end: 7.5, label: "C", confidence: 0.4 },
     { start: 7.5, end: 15, label: "G", confidence: 0.4 },
     { start: 15, end: 22.5, label: "Am", confidence: 0.4 },
     { start: 22.5, end: 30, label: "F", confidence: 0.4 }
-  ]);
+  ];
   return (
     <div
       className="chordTimeline"
@@ -1427,12 +1423,12 @@ function translateWarning(warning: string) {
 
 function stemPlaceholders() {
   return [
-    { name: "vocals" as StemName, color: STEM_COLORS.vocals, audio_url: null, midi_url: null, waveform: [], silent: true },
-    { name: "drums" as StemName, color: STEM_COLORS.drums, audio_url: null, midi_url: null, waveform: [], silent: true },
-    { name: "bass" as StemName, color: STEM_COLORS.bass, audio_url: null, midi_url: null, waveform: [], silent: true },
-    { name: "guitar" as StemName, color: STEM_COLORS.guitar, audio_url: null, midi_url: null, waveform: [], silent: true },
-    { name: "piano" as StemName, color: STEM_COLORS.piano, audio_url: null, midi_url: null, waveform: [], silent: true },
-    { name: "other" as StemName, color: STEM_COLORS.other, audio_url: null, midi_url: null, waveform: [], silent: true }
+    { name: "vocals" as StemName, color: STEM_COLORS.vocals, waveform: [] },
+    { name: "drums" as StemName, color: STEM_COLORS.drums, waveform: [] },
+    { name: "bass" as StemName, color: STEM_COLORS.bass, waveform: [] },
+    { name: "guitar" as StemName, color: STEM_COLORS.guitar, waveform: [] },
+    { name: "piano" as StemName, color: STEM_COLORS.piano, waveform: [] },
+    { name: "other" as StemName, color: STEM_COLORS.other, waveform: [] }
   ];
 }
 
@@ -1578,25 +1574,6 @@ function getCurrentChord(analysis: Analysis | null, time: number) {
   if (!analysis || !analysis.chords.length) return "--";
   const chord = analysis.chords.find((item) => time >= item.start && time < item.end) ?? analysis.chords[analysis.chords.length - 1];
   return chord?.label ?? "--";
-}
-
-function fillChordTimeline(duration: number, chords: Chord[]) {
-  if (!chords.length) return [];
-  const filled: Chord[] = [];
-  let cursor = 0;
-  for (const [index, chord] of chords.entries()) {
-    const start = index === 0 ? 0 : clamp(chord.start, 0, duration);
-    const end = clamp(Math.max(chord.end, start), 0, duration);
-    if (start > cursor && filled.length) {
-      filled[filled.length - 1] = { ...filled[filled.length - 1], end: start };
-    }
-    filled.push({ ...chord, start, end });
-    cursor = end;
-  }
-  if (duration > 0 && filled.length && filled[filled.length - 1].end < duration) {
-    filled[filled.length - 1] = { ...filled[filled.length - 1], end: duration };
-  }
-  return filled.filter((chord) => chord.end > chord.start);
 }
 
 function buildWavePath(peaks: number[]) {

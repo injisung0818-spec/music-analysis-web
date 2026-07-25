@@ -220,10 +220,10 @@ class MusicProcessor:
             beat_times = librosa.frames_to_time(beat_frames, sr=sr).tolist()
             chroma = librosa.feature.chroma_stft(y=y, sr=sr, hop_length=2048, n_fft=4096)
             key, mode = estimate_key(chroma)
-            chords = estimate_chords(chroma, sr, librosa, duration)
+            chords = estimate_chords(chroma, sr, librosa)
             mix_waveform = waveform_peaks(audio_wav)
             waveforms = {
-                stem: stem_waveform(stem, path) if (path := stem_paths.get(stem)) else silent_waveform(len(mix_waveform))
+                stem: stem_waveform(stem, path, mix_waveform) if (path := stem_paths.get(stem)) else shaped_mix_waveform(stem, mix_waveform)
                 for stem in STEMS
             }
             return {
@@ -244,7 +244,7 @@ class MusicProcessor:
             chords = mock_chords(duration)
             mix_waveform = waveform_peaks(audio_wav)
             waveforms = {
-                stem: stem_waveform(stem, path) if (path := stem_paths.get(stem)) else silent_waveform(len(mix_waveform))
+                stem: stem_waveform(stem, path, mix_waveform) if (path := stem_paths.get(stem)) else shaped_mix_waveform(stem, mix_waveform)
                 for stem in STEMS
             }
             return {
@@ -462,15 +462,11 @@ def synthetic_waveform(points: int) -> list[float]:
     return [round(0.15 + 0.7 * abs(math.sin(i * 0.19)) * (0.6 + 0.4 * abs(math.sin(i * 0.047))), 4) for i in range(points)]
 
 
-def stem_waveform(stem: str, path: Path) -> list[float]:
+def stem_waveform(stem: str, path: Path, mix_waveform: list[float]) -> list[float]:
     peaks = waveform_peaks(path)
-    if peaks and max(peaks) > SILENT_PEAK_THRESHOLD:
+    if peaks and max(peaks) > 0.01:
         return peaks
-    return silent_waveform(len(peaks))
-
-
-def silent_waveform(points: int = 2400) -> list[float]:
-    return [0.0 for _ in range(max(1, points))]
+    return shaped_mix_waveform(stem, mix_waveform)
 
 
 def shaped_mix_waveform(stem: str, mix_waveform: list[float]) -> list[float]:
@@ -502,7 +498,7 @@ def estimate_key(chroma) -> tuple[str, str]:
     return key, mode
 
 
-def estimate_chords(chroma, sr: int, librosa, duration: float) -> list[dict]:
+def estimate_chords(chroma, sr: int, librosa) -> list[dict]:
     import numpy as np
 
     frames = chroma.shape[1]
@@ -525,7 +521,7 @@ def estimate_chords(chroma, sr: int, librosa, duration: float) -> list[dict]:
             }
         )
         start = max(end, start + 1)
-    return extend_chords_to_duration(merge_adjacent_chords(chords), duration)
+    return merge_adjacent_chords(chords)
 
 
 def estimate_chord_label(chroma_vector) -> tuple[str, float]:
@@ -554,23 +550,6 @@ def merge_adjacent_chords(chords: list[dict]) -> list[dict]:
         else:
             merged.append(chord)
     return merged[:120]
-
-
-def extend_chords_to_duration(chords: list[dict], duration: float) -> list[dict]:
-    if duration <= 0:
-        return chords
-    if not chords:
-        return mock_chords(duration)
-    normalized = []
-    cursor = 0.0
-    for index, chord in enumerate(chords):
-        start = 0.0 if index == 0 else max(cursor, min(float(chord["start"]), duration))
-        end = max(start, min(float(chord["end"]), duration))
-        normalized.append({**chord, "start": round(start, 3), "end": round(end, 3)})
-        cursor = end
-    if normalized[-1]["end"] < duration:
-        normalized[-1]["end"] = round(duration, 3)
-    return normalized
 
 
 def mock_chords(duration: float) -> list[dict]:
