@@ -43,7 +43,7 @@ export async function deleteJob(id: string): Promise<void> {
   const response = await fetch(`${API_BASE}/api/jobs/${id}`, {
     method: "DELETE"
   });
-  if (response.status === 405) return;
+  if (response.status === 404 || response.status === 405) return;
   if (!response.ok) {
     throw new Error(await response.text());
   }

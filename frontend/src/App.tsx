@@ -583,11 +583,35 @@ export default function App() {
     setEditingFolderId(null);
   }
 
-  function removeFolder(folderId: string) {
+  async function removeFolder(folderId: string) {
+    const removedSongs = songs.filter((song) => song.folderId === folderId);
+    const removedSongIds = new Set(removedSongs.map((song) => song.id));
+    const remainingSongs = sortSongs(songs.filter((song) => !removedSongIds.has(song.id)));
+    const nextSong = remainingSongs[0] ?? null;
+
     setOpenFolderMenuId(null);
     setEditingFolderId(null);
     setFolders((prev) => prev.filter((folder) => folder.id !== folderId));
-    setSongs((prev) => prev.map((song) => (song.folderId === folderId ? { ...song, folderId: null } : song)));
+    setSongs(remainingSongs);
+
+    if (activeSongId && removedSongIds.has(activeSongId)) {
+      setIsPlaying(false);
+      pauseAll();
+      setCurrentTime(0);
+      setJob(nextSong?.job ?? null);
+      setAnalysis(nextSong?.analysis ?? null);
+      setError(null);
+      setActiveSongId(nextSong?.id ?? null);
+    }
+
+    const deleteResults = await Promise.allSettled(
+      removedSongs
+        .map((song) => song.jobId ?? song.job?.id)
+        .filter((jobId): jobId is string => Boolean(jobId))
+        .map((jobId) => deleteJob(jobId))
+    );
+    const failed = deleteResults.find((result) => result.status === "rejected");
+    if (failed) setError(String(failed.reason));
   }
 
   function moveSongToFolder(songId: string, folderId: string | null) {
@@ -732,7 +756,7 @@ export default function App() {
                   setEditingFolderId(folder.id);
                   setOpenFolderMenuId(null);
                 }}
-                onDelete={() => removeFolder(folder.id)}
+                onDelete={() => void removeFolder(folder.id)}
                 onMenu={() => setOpenFolderMenuId((openId) => (openId === folder.id ? null : folder.id))}
                 onToggle={() => setFolders((prev) => prev.map((item) => (item.id === folder.id ? { ...item, open: !item.open } : item)))}
               />
