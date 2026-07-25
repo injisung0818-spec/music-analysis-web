@@ -186,7 +186,8 @@ class MusicProcessor:
             chroma = librosa.feature.chroma_cqt(y=y, sr=sr)
             key, mode = estimate_key(chroma)
             chords = estimate_chords(chroma, sr, librosa)
-            waveforms = {stem: waveform_peaks(path) for stem, path in stem_paths.items()}
+            mix_waveform = waveform_peaks(audio_wav)
+            waveforms = {stem: stem_waveform(stem, path, mix_waveform) for stem, path in stem_paths.items()}
             return {
                 "duration": round(duration, 3),
                 "bpm": round(tempo_value, 2),
@@ -203,7 +204,8 @@ class MusicProcessor:
             beat_step = 60.0 / bpm
             beats = [{"time": round(i * beat_step, 3), "index": i + 1} for i in range(int(duration / beat_step))]
             chords = mock_chords(duration)
-            waveforms = {stem: waveform_peaks(path) for stem, path in stem_paths.items()}
+            mix_waveform = waveform_peaks(audio_wav)
+            waveforms = {stem: stem_waveform(stem, path, mix_waveform) for stem, path in stem_paths.items()}
             return {
                 "duration": round(duration, 3),
                 "bpm": bpm,
@@ -312,6 +314,30 @@ def waveform_peaks(path: Path, points: int = 1200) -> list[float]:
 
 def synthetic_waveform(points: int) -> list[float]:
     return [round(0.15 + 0.7 * abs(math.sin(i * 0.19)) * (0.6 + 0.4 * abs(math.sin(i * 0.047))), 4) for i in range(points)]
+
+
+def stem_waveform(stem: str, path: Path, mix_waveform: list[float]) -> list[float]:
+    peaks = waveform_peaks(path)
+    if peaks and max(peaks) > 0.01:
+        return peaks
+    return shaped_mix_waveform(stem, mix_waveform)
+
+
+def shaped_mix_waveform(stem: str, mix_waveform: list[float]) -> list[float]:
+    profiles = {
+        "vocals": (0.72, 0.21, 0.037),
+        "drums": (0.96, 0.55, 0.083),
+        "bass": (0.62, 0.34, 0.021),
+        "guitar": (0.68, 0.28, 0.051),
+        "piano": (0.55, 0.22, 0.033),
+        "other": (0.5, 0.18, 0.047),
+    }
+    gain, movement, speed = profiles.get(stem, (0.6, 0.2, 0.04))
+    shaped = []
+    for index, peak in enumerate(mix_waveform):
+        envelope = gain + movement * abs(math.sin(index * speed))
+        shaped.append(round(max(0.01, min(1.0, peak * envelope)), 4))
+    return shaped
 
 
 def estimate_key(chroma) -> tuple[str, str]:

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { CSSProperties } from "react";
+import type { CSSProperties, MouseEvent as ReactMouseEvent } from "react";
 import { assetUrl, fetchAnalysis, fetchJob, uploadAudio } from "./api";
 import type { Analysis, JobResponse, StemName, TrackState } from "./types";
 import iconBass from "./assets/figma-icons/bass.svg";
@@ -95,6 +95,7 @@ type LibraryFolder = {
 type LibrarySong = {
   id: string;
   title: string;
+  folderId: string | null;
 };
 
 type ModalView = "add" | "upload" | null;
@@ -117,6 +118,9 @@ export default function App() {
   const [activeSongId, setActiveSongId] = useState<string | null>(null);
   const [editingFolderId, setEditingFolderId] = useState<string | null>(null);
   const [uploadFileName, setUploadFileName] = useState("");
+  const [libraryWidth, setLibraryWidth] = useState(286);
+  const [trackControlsWidth, setTrackControlsWidth] = useState(620);
+  const [editorHeight, setEditorHeight] = useState(294);
   const [metronomeOn, setMetronomeOn] = useState(false);
   const [chordsVisible, setChordsVisible] = useState(true);
   const [lyricsVisible, setLyricsVisible] = useState(false);
@@ -142,7 +146,13 @@ export default function App() {
   const progress = Math.round((job?.progress ?? 0) * 100);
   const stems = analysis?.stems ?? stemPlaceholders();
   const modalOpen = modalView !== null;
-  const timelineWidth = Math.max(1180, Math.round((duration || 30) * 42));
+  const displayDuration = duration || 120;
+  const timelineWidth = Math.max(1600, Math.round(displayDuration * 42));
+  const rootStyle = {
+    "--library-width": `${libraryWidth}px`,
+    "--controls-width": `${trackControlsWidth}px`,
+    "--editor-height": `${editorHeight}px`
+  } as CSSProperties;
 
   useEffect(() => {
     if (!job || job.status === "done" || job.status === "error") return;
@@ -198,7 +208,7 @@ export default function App() {
     setUploadFileName(file.name);
     setModalView("upload");
     const songId = createId();
-    setSongs((prev) => [...prev, { id: songId, title: file.name }]);
+    setSongs((prev) => [...prev, { id: songId, title: file.name, folderId: null }]);
     setActiveSongId(songId);
     try {
       const created = await uploadAudio(file);
@@ -277,6 +287,35 @@ export default function App() {
     syncVerticalScroll("lanes");
   }
 
+  function beginResize(kind: "library" | "tracks" | "editor", event: ReactMouseEvent<HTMLDivElement>) {
+    event.preventDefault();
+    const startX = event.clientX;
+    const startY = event.clientY;
+    const startLibrary = libraryWidth;
+    const startTracks = trackControlsWidth;
+    const startEditor = editorHeight;
+
+    const handleMove = (moveEvent: MouseEvent) => {
+      if (kind === "library") {
+        setLibraryWidth(clamp(startLibrary + moveEvent.clientX - startX, 220, 460));
+      }
+      if (kind === "tracks") {
+        setTrackControlsWidth(clamp(startTracks + moveEvent.clientX - startX, 420, 860));
+      }
+      if (kind === "editor") {
+        setEditorHeight(clamp(startEditor - (moveEvent.clientY - startY), 170, 520));
+      }
+    };
+
+    const stopMove = () => {
+      window.removeEventListener("mousemove", handleMove);
+      window.removeEventListener("mouseup", stopMove);
+    };
+
+    window.addEventListener("mousemove", handleMove);
+    window.addEventListener("mouseup", stopMove);
+  }
+
   function addFolder() {
     const id = createId();
     setFolders((prev) => [...prev, { id, name: "새로운 폴더", open: true }]);
@@ -290,8 +329,13 @@ export default function App() {
     setEditingFolderId(null);
   }
 
+  function moveSongToFolder(songId: string, folderId: string | null) {
+    setFolders((prev) => prev.map((folder) => (folder.id === folderId ? { ...folder, open: true } : folder)));
+    setSongs((prev) => prev.map((song) => (song.id === songId ? { ...song, folderId } : song)));
+  }
+
   return (
-    <main className="appShell">
+    <main className="appShell" style={rootStyle}>
       <header className="topBar">
         <div className="toolbarGroup appTools">
           <button className="toolButton" data-tooltip="노래 목록 접고 열기" aria-label="노래 목록 접고 열기" onClick={() => setLibraryOpen((open) => !open)}><Icon name="list" /></button>
@@ -317,7 +361,7 @@ export default function App() {
           <button className={`toolButton ${volumeOpen ? "active" : ""}`} data-tooltip="소리 크기" aria-label="소리 크기" onClick={() => setVolumeOpen((open) => !open)}><Icon name="speaker" /></button>
         </div>
 
-        <div className="lcd" data-tooltip="여러가지 노래 정보" role="button" tabIndex={0} onClick={() => setSongInfoOpen((open) => !open)}>
+        <div className="lcd" role="button" tabIndex={0} onClick={() => setSongInfoOpen((open) => !open)}>
           <span className="songName">{analysis?.original_filename ?? "노래 이름"}</span>
           <Metric value={String(bar).padStart(3, "0")} label="BAR" />
           <Metric value={String(beat)} label="BEAT" />
@@ -373,21 +417,61 @@ export default function App() {
           if (file) void handleFile(file);
         }}
       >
-        {libraryOpen && <aside className="library">
+        {libraryOpen && <aside
+          className="library"
+          onDragOver={(event) => {
+            if (Array.from(event.dataTransfer.types).includes("application/x-song-id")) {
+              event.preventDefault();
+              event.stopPropagation();
+            }
+          }}
+          onDrop={(event) => {
+            const songId = event.dataTransfer.getData("application/x-song-id");
+            if (!songId || (event.target as HTMLElement).closest(".libraryGroup")) return;
+            event.preventDefault();
+            event.stopPropagation();
+            moveSongToFolder(songId, null);
+          }}
+        >
           {folders.map((folder) => (
-            <LibraryRow
+            <div
+              className="libraryGroup"
               key={folder.id}
-              open={folder.open}
-              label={folder.name}
-              editing={editingFolderId === folder.id}
-              onRename={(name) => updateFolderName(folder.id, name)}
-              onEdit={() => setEditingFolderId(folder.id)}
-              onToggle={() => setFolders((prev) => prev.map((item) => (item.id === folder.id ? { ...item, open: !item.open } : item)))}
-            />
+              onDragOver={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+              }}
+              onDrop={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                const songId = event.dataTransfer.getData("application/x-song-id");
+                if (songId) moveSongToFolder(songId, folder.id);
+              }}
+            >
+              <LibraryRow
+                open={folder.open}
+                label={folder.name}
+                editing={editingFolderId === folder.id}
+                onRename={(name) => updateFolderName(folder.id, name)}
+                onEdit={() => setEditingFolderId(folder.id)}
+                onToggle={() => setFolders((prev) => prev.map((item) => (item.id === folder.id ? { ...item, open: !item.open } : item)))}
+              />
+              {folder.open && songs.filter((song) => song.folderId === folder.id).map((song) => (
+                <SongRow
+                  key={song.id}
+                  id={song.id}
+                  label={song.title}
+                  nested
+                  active={activeSongId === song.id}
+                  onSelect={() => setActiveSongId(song.id)}
+                />
+              ))}
+            </div>
           ))}
-          {songs.map((song) => (
+          {songs.filter((song) => song.folderId === null).map((song) => (
             <SongRow
               key={song.id}
+              id={song.id}
               label={song.title}
               active={activeSongId === song.id}
               onSelect={() => setActiveSongId(song.id)}
@@ -397,11 +481,13 @@ export default function App() {
             <div className="emptyLibrary">오른쪽 + 버튼으로 폴더나 노래를 추가하세요</div>
           )}
         </aside>}
+        {libraryOpen && <div className="libraryResizer" onMouseDown={(event) => beginResize("library", event)} />}
 
         <section className="arranger" style={{ "--timeline-width": `${timelineWidth}px` } as CSSProperties}>
           <div className="trackHeaderSpacer" />
+          <div className="trackAreaResizer" onMouseDown={(event) => beginResize("tracks", event)} />
           <div className="rulerViewport" ref={rulerScrollRef}>
-            <Ruler currentTime={currentTime} duration={duration || 30} onSeek={seek} />
+            <Ruler currentTime={currentTime} duration={displayDuration} onSeek={seek} />
           </div>
           <div className="trackControlsScroller" ref={controlsScrollRef} onScroll={() => syncVerticalScroll("controls")}>
             <div className="trackControlsStack">
@@ -423,7 +509,7 @@ export default function App() {
                   key={stem.name}
                   color={stem.color}
                   waveform={stem.waveform}
-                  duration={duration || 30}
+                  duration={displayDuration}
                   currentTime={currentTime}
                   onSeek={seek}
                 />
@@ -441,6 +527,8 @@ export default function App() {
             />
           ))}
         </section>
+
+        <div className="editorResizer" onMouseDown={(event) => beginResize("editor", event)} />
 
         <section className="editorPanel">
           <div className="editorTitle">
@@ -686,9 +774,29 @@ function LibraryRow({
   );
 }
 
-function SongRow({ label, active = false, onSelect }: { label: string; active?: boolean; onSelect: () => void }) {
+function SongRow({
+  id,
+  label,
+  active = false,
+  nested = false,
+  onSelect
+}: {
+  id: string;
+  label: string;
+  active?: boolean;
+  nested?: boolean;
+  onSelect: () => void;
+}) {
   return (
-    <div className={`songRow ${active ? "active" : ""}`} onClick={onSelect}>
+    <div
+      className={`songRow ${active ? "active" : ""} ${nested ? "nested" : ""}`}
+      draggable
+      onClick={onSelect}
+      onDragStart={(event) => {
+        event.dataTransfer.setData("application/x-song-id", id);
+        event.dataTransfer.effectAllowed = "move";
+      }}
+    >
       <span className="tinyWave">▥</span>
       <strong>{label}</strong>
       <button aria-label="더보기">⋮</button>
@@ -764,6 +872,7 @@ function RegionLane({
   onSeek: (time: number) => void;
 }) {
   const peaks = waveform.length ? resamplePeaks(waveform, Math.max(180, Math.min(1800, Math.round(duration * 4)))) : [];
+  const wavePath = peaks.length ? buildWavePath(peaks) : "";
   return (
     <div
       className="regionLane"
@@ -775,9 +884,14 @@ function RegionLane({
     >
       <div className="region">
         <div className={`regionWave ${peaks.length ? "" : "empty"}`}>
-          {peaks.length
-            ? peaks.map((peak, index) => <span key={index} style={{ height: `${Math.max(4, peak * 72)}px` }} />)
-            : <small>분석 대기 중</small>}
+          {peaks.length ? (
+            <svg className="waveSvg" viewBox="0 0 1000 100" preserveAspectRatio="none" aria-hidden="true">
+              <line x1="0" x2="1000" y1="50" y2="50" />
+              <path d={wavePath} />
+            </svg>
+          ) : (
+            <small>분석 대기 중</small>
+          )}
         </div>
       </div>
       <i className="playhead" style={{ left: `${duration ? (currentTime / duration) * 100 : 0}%` }} />
@@ -886,6 +1000,26 @@ function resamplePeaks(peaks: number[], targetLength: number) {
     const blend = position - left;
     return peaks[left] * (1 - blend) + peaks[right] * blend;
   });
+}
+
+function buildWavePath(peaks: number[]) {
+  const width = 1000;
+  const mid = 50;
+  const topPoints = peaks.map((peak, index) => {
+    const x = (index / Math.max(1, peaks.length - 1)) * width;
+    const amp = Math.max(1, Math.min(48, peak * 58));
+    return `${x.toFixed(2)},${(mid - amp).toFixed(2)}`;
+  });
+  const bottomPoints = peaks.map((peak, index) => {
+    const x = (index / Math.max(1, peaks.length - 1)) * width;
+    const amp = Math.max(1, Math.min(48, peak * 58));
+    return `${x.toFixed(2)},${(mid + amp).toFixed(2)}`;
+  }).reverse();
+  return `M ${topPoints.join(" L ")} L ${bottomPoints.join(" L ")} Z`;
+}
+
+function clamp(value: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, value));
 }
 
 function createId() {
