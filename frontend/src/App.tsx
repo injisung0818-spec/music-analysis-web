@@ -1407,6 +1407,9 @@ function translateWarning(warning: string) {
   if (warning.includes("stem 압축에 실패해 WAV로 저장했습니다")) {
     return "일부 stem 압축에 실패해 WAV로 저장했습니다.";
   }
+  if (warning.includes("저장 용량을 줄이기 위해 fallback 무음 stem 파일 생성을 생략했습니다")) {
+    return "저장 용량을 줄이기 위해 fallback 무음 stem 파일 생성을 생략했습니다.";
+  }
   return warning;
 }
 

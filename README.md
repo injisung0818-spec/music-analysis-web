@@ -11,6 +11,7 @@
 - `basic-pitch` MIDI extraction when installed
 - Faster default upload mode skips heavy Basic Pitch MIDI inference and writes placeholder MIDI; set `MUSIC_FAST_UPLOAD=0` for full MIDI extraction
 - Storage-saving result mode compresses generated stem WAV files to AAC `.m4a` when `ffmpeg` is available, then removes temporary WAV/source files
+- Original uploaded files are deleted right after conversion, and fallback silent stem files are skipped to reduce disk usage without changing audible output
 - Graceful fallback mode: missing `ffmpeg`, `demucs`, `librosa`, or `basic-pitch` will not crash a job
 - Outputs per job: compressed `stems/*.m4a` when possible, `midi/*.mid`, `analysis.json`
 - React/Vite/TypeScript UI with transport, stem mute/solo/volume, waveform lanes, progress and warnings
@@ -93,5 +94,6 @@ backend/storage/jobs/<job_id>/
 - The first Demucs or Basic Pitch run may be slow and may require model downloads, depending on local installation.
 - By default, `MUSIC_FAST_UPLOAD=1` keeps uploads faster by skipping Basic Pitch inference. Stem separation, waveform, BPM, key, and chord analysis still run locally.
 - Stem audio is stored as `.m4a` at `MUSIC_STEM_BITRATE=96k` by default when `ffmpeg` is available. Increase the bitrate, for example `MUSIC_STEM_BITRATE=160k`, if you want higher quality.
+- Lowering `MUSIC_STEM_BITRATE` saves more space but is a lossy tradeoff; the app reduces extra storage without that tradeoff by removing source/intermediate/silent fallback files.
 - If `ffmpeg` is missing and an MP3 is uploaded, the backend generates silent fallback WAVs and still returns a completed job with warnings.
 - This app does not call external paid APIs.

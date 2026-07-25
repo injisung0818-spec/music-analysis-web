@@ -72,6 +72,7 @@ class MusicProcessor:
             midi_dir.mkdir(exist_ok=True)
 
             converted = await self._convert_to_wav(source, audio_wav, state)
+            remove_upload_source(source)
             await self._set(state, "running", 0.16, "스템 분리 중")
 
             stem_paths = await self._separate_stems(converted, stems_dir, state)
@@ -113,7 +114,7 @@ class MusicProcessor:
                 "warnings": state.warnings,
                 "generated_at": now_iso(),
             }
-            (job_dir / "analysis.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
+            (job_dir / "analysis.json").write_text(json.dumps(result, separators=(",", ":")), encoding="utf-8")
             cleanup_intermediates(source, converted, stems_dir)
             await self._set(state, "done", 1.0, "분석 완료")
         except Exception as exc:
@@ -186,15 +187,11 @@ class MusicProcessor:
         else:
             state.warnings.append("demucs 명령을 찾을 수 없어 실제 스템 분리 대신 fallback stems를 생성했습니다.")
 
-        duration = get_wav_duration(audio_wav) or 30.0
         paths = {}
-        for stem in STEMS:
-            dst = stems_dir / f"{stem}.wav"
-            if stem == "other":
-                shutil.copyfile(audio_wav, dst)
-            else:
-                write_silent_wav(dst, duration)
-            paths[stem] = dst
+        other_path = stems_dir / "other.wav"
+        shutil.copyfile(audio_wav, other_path)
+        paths["other"] = other_path
+        state.warnings.append("저장 용량을 줄이기 위해 fallback 무음 stem 파일 생성을 생략했습니다.")
         return paths
 
     def _analyze_audio(self, audio_wav: Path, stem_paths: dict[str, Path], state: JobState) -> dict:
@@ -211,7 +208,10 @@ class MusicProcessor:
             key, mode = estimate_key(chroma)
             chords = estimate_chords(chroma, sr, librosa)
             mix_waveform = waveform_peaks(audio_wav)
-            waveforms = {stem: stem_waveform(stem, path, mix_waveform) for stem, path in stem_paths.items()}
+            waveforms = {
+                stem: stem_waveform(stem, path, mix_waveform) if (path := stem_paths.get(stem)) else shaped_mix_waveform(stem, mix_waveform)
+                for stem in STEMS
+            }
             return {
                 "duration": round(duration, 3),
                 "bpm": round(tempo_value, 2),
@@ -229,7 +229,10 @@ class MusicProcessor:
             beats = [{"time": round(i * beat_step, 3), "index": i + 1} for i in range(int(duration / beat_step))]
             chords = mock_chords(duration)
             mix_waveform = waveform_peaks(audio_wav)
-            waveforms = {stem: stem_waveform(stem, path, mix_waveform) for stem, path in stem_paths.items()}
+            waveforms = {
+                stem: stem_waveform(stem, path, mix_waveform) if (path := stem_paths.get(stem)) else shaped_mix_waveform(stem, mix_waveform)
+                for stem in STEMS
+            }
             return {
                 "duration": round(duration, 3),
                 "bpm": bpm,
@@ -507,11 +510,15 @@ def write_placeholder_midis(midi_dir: Path) -> dict[str, Path]:
     return midi_paths
 
 
-def cleanup_intermediates(source: Path, converted: Path, stems_dir: Path) -> None:
-    converted.unlink(missing_ok=True)
+def remove_upload_source(source: Path) -> None:
     source.unlink(missing_ok=True)
     if source.parent.exists() and not any(source.parent.iterdir()):
         source.parent.rmdir()
+
+
+def cleanup_intermediates(source: Path, converted: Path, stems_dir: Path) -> None:
+    converted.unlink(missing_ok=True)
+    remove_upload_source(source)
     shutil.rmtree(stems_dir / "_demucs", ignore_errors=True)
 
 
