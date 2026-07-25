@@ -52,4 +52,5 @@ export interface TrackState {
   muted: boolean;
   solo: boolean;
   volume: number;
+  pan: number;
 }

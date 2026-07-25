@@ -1087,14 +1087,65 @@ button {
   accent-color: #d7d7d7;
 }
 
+.panControl {
+  position: relative;
+  width: 64px;
+  height: 64px;
+  justify-self: center;
+  display: grid;
+  place-items: center;
+}
+
+.panControl input[type="range"] {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: ew-resize;
+}
+
 .panKnob {
+  --pan: 0;
+  position: relative;
   width: 52px;
   height: 52px;
-  justify-self: center;
   border-radius: 50%;
   border: 4px solid #282828;
   background: radial-gradient(circle at 35% 35%, #d9d9d9, #a6a6a6 58%, #6d6d6d 60%);
   box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.14);
+}
+
+.panKnob i {
+  position: absolute;
+  left: 50%;
+  top: 7px;
+  width: 4px;
+  height: 13px;
+  border-radius: 999px;
+  background: #2c2c2c;
+  transform: translateX(-50%) rotate(calc(var(--pan) * 135deg));
+  transform-origin: 50% 19px;
+}
+
+.panKnob small,
+.panKnob b {
+  position: absolute;
+  bottom: -18px;
+  color: #d9d9d9;
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.panKnob small {
+  left: 2px;
+}
+
+.panKnob b {
+  right: 0;
 }
 
 .lanesScroller {

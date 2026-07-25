@@ -24,12 +24,12 @@ import iconSettings from "./assets/figma-icons/settings.svg";
 import iconSpeaker from "./assets/figma-icons/speaker.svg";
 
 const INITIAL_TRACKS: Record<StemName, TrackState> = {
-  vocals: { muted: false, solo: false, volume: 0.9 },
-  drums: { muted: false, solo: false, volume: 0.88 },
-  bass: { muted: false, solo: false, volume: 0.86 },
-  guitar: { muted: false, solo: false, volume: 0.78 },
-  piano: { muted: false, solo: false, volume: 0.78 },
-  other: { muted: false, solo: false, volume: 0.72 }
+  vocals: { muted: false, solo: false, volume: 0.9, pan: 0 },
+  drums: { muted: false, solo: false, volume: 0.88, pan: 0 },
+  bass: { muted: false, solo: false, volume: 0.86, pan: 0 },
+  guitar: { muted: false, solo: false, volume: 0.78, pan: 0 },
+  piano: { muted: false, solo: false, volume: 0.78, pan: 0 },
+  other: { muted: false, solo: false, volume: 0.72, pan: 0 }
 };
 
 const STEM_LABELS: Record<StemName, string> = {
@@ -73,6 +73,12 @@ const STATUS_LABELS: Record<string, string> = {
   done: "완료",
   error: "오류",
   ready: "준비됨"
+};
+
+type PanGraph = {
+  audio: HTMLAudioElement;
+  source: MediaElementAudioSourceNode;
+  panner: StereoPannerNode;
 };
 
 const MESSAGE_LABELS: Record<string, string> = {
@@ -128,6 +134,7 @@ export default function App() {
   const [globalVolume, setGlobalVolume] = useState(1);
   const [error, setError] = useState<string | null>(null);
   const audioRefs = useRef<Record<string, HTMLAudioElement | null>>({});
+  const panGraphRefs = useRef<Record<string, PanGraph>>({});
   const rafRef = useRef<number | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const metronomeBeatRef = useRef(-1);
@@ -150,7 +157,8 @@ export default function App() {
   const stems = analysis?.stems ?? stemPlaceholders();
   const modalOpen = modalView !== null;
   const displayDuration = duration || 120;
-  const timelineWidth = Math.max(1600, Math.round(displayDuration * 42));
+  const timelinePixelsPerSecond = analysis ? 16 : 22;
+  const timelineWidth = Math.max(1500, Math.min(6200, Math.round(displayDuration * timelinePixelsPerSecond)));
   const currentChord = useMemo(() => getCurrentChord(analysis, currentTime), [analysis, currentTime]);
   const rootStyle = {
     "--library-width": `${libraryWidth}px`,
@@ -204,6 +212,8 @@ export default function App() {
       audio.volume = state.volume * globalVolume;
       audio.muted = state.muted || (soloActive && !state.solo);
       audio.loop = repeatOn;
+      const graph = ensurePanGraph(stem.name, audio);
+      if (graph) graph.panner.pan.value = state.pan;
     }
   }, [tracks, soloActive, analysis, globalVolume, repeatOn]);
 
@@ -276,9 +286,16 @@ export default function App() {
     if (!analysis) return;
     const nextPlaying = !isPlaying;
     setIsPlaying(nextPlaying);
-    if (nextPlaying && metronomeOn) {
-      void ensureAudioContext()?.resume();
-      metronomeBeatRef.current = -1;
+    if (nextPlaying) {
+      const context = ensureAudioContext();
+      if (context?.state === "suspended") await context.resume().catch(() => undefined);
+      if (metronomeOn) metronomeBeatRef.current = -1;
+    }
+    if (nextPlaying && analysis) {
+      for (const stem of analysis.stems) {
+        const audio = audioRefs.current[stem.name];
+        if (audio) ensurePanGraph(stem.name, audio);
+      }
     }
     const audible = analysis.stems
       .map((stem) => audioRefs.current[stem.name])
@@ -323,6 +340,24 @@ export default function App() {
     if (!AudioContextCtor) return null;
     audioContextRef.current = new AudioContextCtor();
     return audioContextRef.current;
+  }
+
+  function ensurePanGraph(stemName: StemName, audio: HTMLAudioElement) {
+    const existing = panGraphRefs.current[stemName];
+    if (existing?.audio === audio) return existing;
+    const context = ensureAudioContext();
+    if (!context || !context.createStereoPanner) return null;
+    try {
+      const source = context.createMediaElementSource(audio);
+      const panner = context.createStereoPanner();
+      source.connect(panner);
+      panner.connect(context.destination);
+      const graph = { audio, source, panner };
+      panGraphRefs.current[stemName] = graph;
+      return graph;
+    } catch {
+      return existing ?? null;
+    }
   }
 
   function playMetronomeClick(accent: boolean) {
@@ -939,7 +974,26 @@ function TrackControlsRow({
         value={state.volume}
         onChange={(event) => onUpdate(name, { volume: Number(event.target.value) })}
       />
-      <span className="panKnob" />
+      <label className="panControl">
+        <input
+          aria-label={`${STEM_LABELS[name]} 좌우 음향`}
+          type="range"
+          min="-1"
+          max="1"
+          step="0.01"
+          value={state.pan}
+          onDoubleClick={() => onUpdate(name, { pan: 0 })}
+          onChange={(event) => onUpdate(name, { pan: Number(event.target.value) })}
+        />
+        <span
+          className="panKnob"
+          style={{ "--pan": state.pan } as CSSProperties}
+        >
+          <i />
+          <small>L</small>
+          <b>R</b>
+        </span>
+      </label>
     </div>
   );
 }
