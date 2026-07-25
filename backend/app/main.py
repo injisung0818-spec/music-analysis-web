@@ -10,7 +10,7 @@ from typing import Annotated
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 
 from .processor import JobState, MusicProcessor, now_iso
@@ -156,7 +156,7 @@ app = FastAPI(title="Local Music Analysis MVP", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -169,7 +169,12 @@ def public_job(state: JobState) -> JobResponse:
 
 @app.get("/api/health")
 def health() -> dict[str, str]:
-    return {"status": "ok"}
+    return {"status": "ok", "app": "local-music-analysis"}
+
+
+@app.options("/api/{path:path}")
+def api_options(path: str) -> Response:
+    return Response(status_code=204)
 
 
 @app.post("/api/jobs", response_model=JobResponse)
@@ -182,6 +187,25 @@ async def create_job(file: Annotated[UploadFile, File(...)]) -> JobResponse:
 async def list_jobs() -> list[JobResponse]:
     states = await store.list()
     return [public_job(state) for state in states]
+
+
+@app.get("/api/jobs/{job_id}/analysis")
+async def get_analysis(job_id: str) -> dict:
+    state = await store.get(job_id)
+    analysis_path = Path(state.job_dir) / "analysis.json"
+    if state.status != "done" or not analysis_path.exists():
+        raise HTTPException(status_code=404, detail="분석 결과가 아직 준비되지 않았습니다.")
+    return json.loads(analysis_path.read_text(encoding="utf-8"))
+
+
+@app.get("/api/jobs/{job_id}/assets/{asset_path:path}")
+async def get_asset(job_id: str, asset_path: str) -> FileResponse:
+    state = await store.get(job_id)
+    root = Path(state.job_dir).resolve()
+    target = (root / asset_path).resolve()
+    if not target.is_file() or root not in target.parents:
+        raise HTTPException(status_code=404, detail="파일을 찾을 수 없습니다.")
+    return FileResponse(target)
 
 
 @app.get("/api/jobs/{job_id}", response_model=JobResponse)
@@ -203,22 +227,3 @@ async def post_delete_job(job_id: str) -> None:
 @app.post("/api/jobs/delete/{job_id}", status_code=204)
 async def post_delete_job_alt(job_id: str) -> None:
     await store.delete(job_id)
-
-
-@app.get("/api/jobs/{job_id}/analysis")
-async def get_analysis(job_id: str) -> dict:
-    state = await store.get(job_id)
-    analysis_path = Path(state.job_dir) / "analysis.json"
-    if state.status != "done" or not analysis_path.exists():
-        raise HTTPException(status_code=404, detail="분석 결과가 아직 준비되지 않았습니다.")
-    return json.loads(analysis_path.read_text(encoding="utf-8"))
-
-
-@app.get("/api/jobs/{job_id}/assets/{asset_path:path}")
-async def get_asset(job_id: str, asset_path: str) -> FileResponse:
-    state = await store.get(job_id)
-    root = Path(state.job_dir).resolve()
-    target = (root / asset_path).resolve()
-    if not target.is_file() or root not in target.parents:
-        raise HTTPException(status_code=404, detail="파일을 찾을 수 없습니다.")
-    return FileResponse(target)
