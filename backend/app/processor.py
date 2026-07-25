@@ -17,12 +17,12 @@ from pydantic import BaseModel
 
 STEMS = ["vocals", "drums", "bass", "guitar", "piano", "other"]
 STEM_COLORS = {
-    "vocals": "#35d0ff",
-    "drums": "#ff6b3d",
-    "bass": "#b5f33a",
-    "guitar": "#ffcc33",
-    "piano": "#b38cff",
-    "other": "#9aa4b2",
+    "vocals": "#69caec",
+    "drums": "#72d1dc",
+    "bass": "#80dce4",
+    "guitar": "#97edf2",
+    "piano": "#c7fbfd",
+    "other": "#e8fbfc",
 }
 KEY_NAMES = ["C", "C#", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B"]
 MAJOR_PROFILE = [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88]
@@ -292,7 +292,7 @@ def write_silent_wav(path: Path, duration: float, sample_rate: int = 44100) -> N
             remaining -= chunk
 
 
-def waveform_peaks(path: Path, points: int = 1200) -> list[float]:
+def waveform_peaks(path: Path, points: int = 2400) -> list[float]:
     try:
         with wave.open(str(path), "rb") as handle:
             channels = handle.getnchannels()

@@ -1147,7 +1147,7 @@ button {
 .regionWave {
   height: 100%;
   position: relative;
-  padding: 12px 28px;
+  padding: 7px 16px;
 }
 
 .waveSvg {
@@ -1157,12 +1157,12 @@ button {
 }
 
 .waveSvg line {
-  stroke: rgba(10, 84, 96, 0.42);
+  stroke: rgba(0, 83, 96, 0.44);
   stroke-width: 1;
 }
 
 .waveSvg path {
-  fill: rgba(0, 95, 110, 0.58);
+  fill: rgba(0, 96, 112, 0.7);
 }
 
 .regionWave.empty {
@@ -1260,6 +1260,7 @@ button {
   gap: 28px;
   padding: 16px 18px;
   color: #9f9f9f;
+  flex-wrap: wrap;
 }
 
 .editorDetails span {

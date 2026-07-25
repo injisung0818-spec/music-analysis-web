@@ -148,6 +148,7 @@ export default function App() {
   const modalOpen = modalView !== null;
   const displayDuration = duration || 120;
   const timelineWidth = Math.max(1600, Math.round(displayDuration * 42));
+  const currentChord = useMemo(() => getCurrentChord(analysis, currentTime), [analysis, currentTime]);
   const rootStyle = {
     "--library-width": `${libraryWidth}px`,
     "--controls-width": `${trackControlsWidth}px`,
@@ -198,6 +199,23 @@ export default function App() {
       audio.loop = repeatOn;
     }
   }, [tracks, soloActive, analysis, globalVolume, repeatOn]);
+
+  useEffect(() => {
+    if (!isPlaying || !lanesScrollRef.current || !rulerScrollRef.current) return;
+    const lane = lanesScrollRef.current;
+    const playheadX = (currentTime / displayDuration) * timelineWidth;
+    const margin = Math.min(280, lane.clientWidth * 0.28);
+    const visibleLeft = lane.scrollLeft;
+    const visibleRight = visibleLeft + lane.clientWidth;
+    if (playheadX > visibleRight - margin) {
+      const nextLeft = Math.min(playheadX - lane.clientWidth + margin, lane.scrollWidth - lane.clientWidth);
+      lane.scrollLeft = Math.max(0, nextLeft);
+      rulerScrollRef.current.scrollLeft = lane.scrollLeft;
+    } else if (playheadX < visibleLeft + 80) {
+      lane.scrollLeft = Math.max(0, playheadX - 80);
+      rulerScrollRef.current.scrollLeft = lane.scrollLeft;
+    }
+  }, [currentTime, displayDuration, isPlaying, timelineWidth]);
 
   async function handleFile(file: File) {
     setError(null);
@@ -543,6 +561,7 @@ export default function App() {
             <span>MIDI <strong>{analysis ? analysis.stems.filter((stem) => stem.midi_url).length : 0}</strong></span>
             <span>METRO <strong>{metronomeOn ? "ON" : "OFF"}</strong></span>
             <span>LOOP <strong>{repeatOn ? "ON" : "OFF"}</strong></span>
+            <span>CHORD <strong>{currentChord}</strong></span>
             {(error || job?.error) && <em>{error ?? job?.error}</em>}
           </div>
           {(job?.warnings.length || analysis?.warnings.length) ? (
@@ -871,7 +890,7 @@ function RegionLane({
   currentTime: number;
   onSeek: (time: number) => void;
 }) {
-  const peaks = waveform.length ? resamplePeaks(waveform, Math.max(180, Math.min(1800, Math.round(duration * 4)))) : [];
+  const peaks = waveform.length ? resamplePeaks(waveform, Math.max(500, Math.min(3600, Math.round(duration * 9)))) : [];
   const wavePath = peaks.length ? buildWavePath(peaks) : "";
   return (
     <div
@@ -1000,6 +1019,12 @@ function resamplePeaks(peaks: number[], targetLength: number) {
     const blend = position - left;
     return peaks[left] * (1 - blend) + peaks[right] * blend;
   });
+}
+
+function getCurrentChord(analysis: Analysis | null, time: number) {
+  if (!analysis || !analysis.chords.length) return "--";
+  const chord = analysis.chords.find((item) => time >= item.start && time < item.end) ?? analysis.chords[analysis.chords.length - 1];
+  return chord?.label ?? "--";
 }
 
 function buildWavePath(peaks: number[]) {
