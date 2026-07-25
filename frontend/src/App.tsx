@@ -41,6 +41,15 @@ const STEM_LABELS: Record<StemName, string> = {
   other: "나머지"
 };
 
+const STEM_COLORS: Record<StemName, string> = {
+  vocals: "#69caec",
+  drums: "#72d1dc",
+  bass: "#80dce4",
+  guitar: "#97edf2",
+  piano: "#c7fbfd",
+  other: "#e8fbfc"
+};
+
 const STEM_ICONS: Record<StemName, string> = {
   vocals: iconMic,
   drums: iconDrums,
@@ -102,6 +111,9 @@ type LibrarySong = {
   id: string;
   title: string;
   folderId: string | null;
+  job: JobResponse | null;
+  analysis: Analysis | null;
+  error: string | null;
 };
 
 type ModalView = "add" | "upload" | null;
@@ -172,20 +184,31 @@ export default function App() {
 
   useEffect(() => {
     if (!job || job.status === "done" || job.status === "error") return;
+    const pollingSongId = activeSongId;
     const timer = window.setInterval(async () => {
       try {
         const next = await fetchJob(job.id);
         setJob(next);
+        if (pollingSongId) {
+          setSongs((prev) => prev.map((song) => (song.id === pollingSongId ? { ...song, job: next, error: next.error ?? null } : song)));
+        }
         if (next.status === "done") {
-          const result = await fetchAnalysis(next.id);
+          const result = applyStemPalette(await fetchAnalysis(next.id));
           setAnalysis(result);
+          if (pollingSongId) {
+            setSongs((prev) => prev.map((song) => (song.id === pollingSongId ? { ...song, job: next, analysis: result, error: null } : song)));
+          }
         }
       } catch (pollError) {
-        setError(String(pollError));
+        const message = String(pollError);
+        setError(message);
+        if (pollingSongId) {
+          setSongs((prev) => prev.map((song) => (song.id === pollingSongId ? { ...song, error: message } : song)));
+        }
       }
     }, 1200);
     return () => window.clearInterval(timer);
-  }, [job]);
+  }, [job, activeSongId]);
 
   useEffect(() => {
     if (!isPlaying) {
@@ -263,14 +286,33 @@ export default function App() {
     setUploadFileName(file.name);
     setModalView("upload");
     const songId = createId();
-    setSongs((prev) => [...prev, { id: songId, title: file.name, folderId: null }]);
+    setSongs((prev) => [...prev, { id: songId, title: file.name, folderId: null, job: null, analysis: null, error: null }]);
     setActiveSongId(songId);
     try {
       const created = await uploadAudio(file);
       setJob(created);
+      setSongs((prev) => prev.map((song) => (song.id === songId ? { ...song, job: created } : song)));
     } catch (uploadError) {
-      setError(String(uploadError));
+      const message = String(uploadError);
+      setError(message);
+      setSongs((prev) => prev.map((song) => (song.id === songId ? { ...song, error: message } : song)));
     }
+  }
+
+  function selectSong(songId: string) {
+    const song = songs.find((item) => item.id === songId);
+    if (!song) return;
+    setIsPlaying(false);
+    pauseAll();
+    setActiveSongId(song.id);
+    setCurrentTime(0);
+    setJob(song.job);
+    setAnalysis(song.analysis);
+    setError(song.error);
+    setSongInfoOpen(false);
+    metronomeBeatRef.current = -1;
+    if (lanesScrollRef.current) lanesScrollRef.current.scrollLeft = 0;
+    if (rulerScrollRef.current) rulerScrollRef.current.scrollLeft = 0;
   }
 
   function firstPlayableAudio() {
@@ -345,6 +387,10 @@ export default function App() {
   function ensurePanGraph(stemName: StemName, audio: HTMLAudioElement) {
     const existing = panGraphRefs.current[stemName];
     if (existing?.audio === audio) return existing;
+    if (existing) {
+      existing.source.disconnect();
+      existing.panner.disconnect();
+    }
     const context = ensureAudioContext();
     if (!context || !context.createStereoPanner) return null;
     try {
@@ -583,7 +629,7 @@ export default function App() {
                   label={song.title}
                   nested
                   active={activeSongId === song.id}
-                  onSelect={() => setActiveSongId(song.id)}
+                  onSelect={() => selectSong(song.id)}
                 />
               ))}
             </div>
@@ -594,7 +640,7 @@ export default function App() {
               id={song.id}
               label={song.title}
               active={activeSongId === song.id}
-              onSelect={() => setActiveSongId(song.id)}
+              onSelect={() => selectSong(song.id)}
             />
           ))}
           {!folders.length && !songs.length && (
@@ -1114,13 +1160,23 @@ function translateWarning(warning: string) {
 
 function stemPlaceholders() {
   return [
-    { name: "vocals" as StemName, color: "#69caec", waveform: [] },
-    { name: "drums" as StemName, color: "#72d1dc", waveform: [] },
-    { name: "bass" as StemName, color: "#80dce4", waveform: [] },
-    { name: "guitar" as StemName, color: "#97edf2", waveform: [] },
-    { name: "piano" as StemName, color: "#c7fbfd", waveform: [] },
-    { name: "other" as StemName, color: "#e8fbfc", waveform: [] }
+    { name: "vocals" as StemName, color: STEM_COLORS.vocals, waveform: [] },
+    { name: "drums" as StemName, color: STEM_COLORS.drums, waveform: [] },
+    { name: "bass" as StemName, color: STEM_COLORS.bass, waveform: [] },
+    { name: "guitar" as StemName, color: STEM_COLORS.guitar, waveform: [] },
+    { name: "piano" as StemName, color: STEM_COLORS.piano, waveform: [] },
+    { name: "other" as StemName, color: STEM_COLORS.other, waveform: [] }
   ];
+}
+
+function applyStemPalette(analysis: Analysis): Analysis {
+  return {
+    ...analysis,
+    stems: analysis.stems.map((stem) => ({
+      ...stem,
+      color: STEM_COLORS[stem.name] ?? stem.color
+    }))
+  };
 }
 
 function formatTime(seconds: number) {
