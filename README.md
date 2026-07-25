@@ -9,6 +9,7 @@
 - Demucs `htdemucs_6s` 6-stem separation when installed
 - `librosa` BPM, beat grid, key, chroma chord timeline analysis when installed
 - `basic-pitch` MIDI extraction when installed
+- Faster default upload mode skips heavy Basic Pitch MIDI inference and writes placeholder MIDI; set `MUSIC_FAST_UPLOAD=0` for full MIDI extraction
 - Graceful fallback mode: missing `ffmpeg`, `demucs`, `librosa`, or `basic-pitch` will not crash a job
 - Outputs per job: `stems/*.wav`, `midi/*.mid`, `analysis.json`
 - React/Vite/TypeScript UI with transport, stem mute/solo/volume, waveform lanes, progress and warnings
@@ -36,6 +37,12 @@ python3.11 -m venv .venv311
 source .venv311/bin/activate
 pip install -r requirements.txt
 uvicorn app.main:app --reload --port 8000
+```
+
+Full Basic Pitch MIDI mode:
+
+```bash
+MUSIC_FAST_UPLOAD=0 uvicorn app.main:app --reload --port 8000
 ```
 
 Recommended local tools:
@@ -84,5 +91,6 @@ backend/storage/jobs/<job_id>/
 ## Notes
 
 - The first Demucs or Basic Pitch run may be slow and may require model downloads, depending on local installation.
+- By default, `MUSIC_FAST_UPLOAD=1` keeps uploads faster by skipping Basic Pitch inference. Stem separation, waveform, BPM, key, and chord analysis still run locally.
 - If `ffmpeg` is missing and an MP3 is uploaded, the backend generates silent fallback WAVs and still returns a completed job with warnings.
 - This app does not call external paid APIs.

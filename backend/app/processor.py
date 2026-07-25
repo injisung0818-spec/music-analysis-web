@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import os
 import shutil
 import struct
 import subprocess
@@ -27,10 +28,18 @@ STEM_COLORS = {
 KEY_NAMES = ["C", "C#", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B"]
 MAJOR_PROFILE = [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88]
 MINOR_PROFILE = [6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17]
+ANALYSIS_SAMPLE_RATE = 22050
 
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def env_flag(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in {"0", "false", "no", "off", ""}
 
 
 class JobState(BaseModel):
@@ -114,11 +123,20 @@ class MusicProcessor:
         await self.update_job(state)
 
     async def _convert_to_wav(self, source: Path, target: Path, state: JobState) -> Path:
+        if source.suffix.lower() == ".wav":
+            shutil.copyfile(source, target)
+            state.warnings.append("WAV 파일이라 ffmpeg 재변환을 건너뛰고 바로 분석했습니다.")
+            return target
+
         ffmpeg = find_executable("ffmpeg")
         if ffmpeg:
             cmd = [
                 ffmpeg,
                 "-y",
+                "-nostdin",
+                "-hide_banner",
+                "-loglevel",
+                "error",
                 "-i",
                 str(source),
                 "-ac",
@@ -178,12 +196,12 @@ class MusicProcessor:
             import librosa
             import numpy as np
 
-            y, sr = librosa.load(audio_wav, sr=44100, mono=True)
+            y, sr = librosa.load(audio_wav, sr=ANALYSIS_SAMPLE_RATE, mono=True)
             duration = float(librosa.get_duration(y=y, sr=sr))
             tempo, beat_frames = librosa.beat.beat_track(y=y, sr=sr, units="frames")
             tempo_value = float(np.asarray(tempo).reshape(-1)[0]) if np.asarray(tempo).size else 120.0
             beat_times = librosa.frames_to_time(beat_frames, sr=sr).tolist()
-            chroma = librosa.feature.chroma_cqt(y=y, sr=sr)
+            chroma = librosa.feature.chroma_stft(y=y, sr=sr, hop_length=2048, n_fft=4096)
             key, mode = estimate_key(chroma)
             chords = estimate_chords(chroma, sr, librosa)
             mix_waveform = waveform_peaks(audio_wav)
@@ -217,6 +235,10 @@ class MusicProcessor:
             }
 
     async def _extract_midi(self, stem_paths: dict[str, Path], midi_dir: Path, state: JobState) -> dict[str, Path]:
+        if env_flag("MUSIC_FAST_UPLOAD", True):
+            state.warnings.append("빠른 업로드 모드로 basic-pitch MIDI 추출을 건너뛰고 placeholder MIDI 파일을 생성했습니다.")
+            return write_placeholder_midis(midi_dir)
+
         try:
             from basic_pitch import ICASSP_2022_MODEL_PATH
             from basic_pitch.inference import predict_and_save
@@ -243,12 +265,7 @@ class MusicProcessor:
             return midi_paths
         except Exception as exc:
             state.warnings.append(f"basic-pitch가 설치되어 있지 않거나 MIDI 추출에 실패해 placeholder MIDI 파일을 생성했습니다. 상세: {exc}")
-            midi_paths = {}
-            for stem in STEMS:
-                target = midi_dir / f"{stem}.mid"
-                write_minimal_midi(target, stem)
-                midi_paths[stem] = target
-            return midi_paths
+            return write_placeholder_midis(midi_dir)
 
     def _run_command(self, cmd: list[str], error_message: str) -> None:
         completed = subprocess.run(cmd, capture_output=True, text=True, check=False)
@@ -433,6 +450,15 @@ def write_minimal_midi(path: Path, track_name: str) -> None:
     header = b"MThd" + struct.pack(">IHHH", 6, 0, 1, 480)
     track = b"MTrk" + struct.pack(">I", len(events)) + bytes(events)
     path.write_bytes(header + track)
+
+
+def write_placeholder_midis(midi_dir: Path) -> dict[str, Path]:
+    midi_paths = {}
+    for stem in STEMS:
+        target = midi_dir / f"{stem}.mid"
+        write_minimal_midi(target, stem)
+        midi_paths[stem] = target
+    return midi_paths
 
 
 def write_var_len(value: int) -> bytes:

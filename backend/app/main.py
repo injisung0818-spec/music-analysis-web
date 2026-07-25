@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import shutil
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -55,7 +54,8 @@ class JobStore:
         safe_name = Path(upload.filename or f"upload{suffix}").name
         source_path = upload_dir / safe_name
         with source_path.open("wb") as handle:
-            shutil.copyfileobj(upload.file, handle)
+            while chunk := await upload.read(1024 * 1024):
+                handle.write(chunk)
 
         state = JobState(
             id=job_id,

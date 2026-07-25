@@ -206,7 +206,7 @@ export default function App() {
           setSongs((prev) => prev.map((song) => (song.id === pollingSongId ? { ...song, error: message } : song)));
         }
       }
-    }, 1200);
+    }, 650);
     return () => window.clearInterval(timer);
   }, [job, activeSongId]);
 
@@ -1140,6 +1140,9 @@ function translateWarning(warning: string) {
   if (warning.includes("ffmpeg not found") && warning.includes("copied WAV")) {
     return "ffmpeg가 설치되어 있지 않아 WAV 파일을 변환 없이 복사했습니다.";
   }
+  if (warning.includes("WAV 파일이라 ffmpeg 재변환을 건너뛰고 바로 분석했습니다")) {
+    return "WAV 파일이라 ffmpeg 재변환을 건너뛰고 바로 분석했습니다.";
+  }
   if (warning.includes("demucs command not found")) {
     return "demucs 명령을 찾을 수 없어 실제 스템 분리 대신 fallback stems를 생성했습니다.";
   }
@@ -1154,6 +1157,9 @@ function translateWarning(warning: string) {
   }
   if (warning.includes("basic-pitch unavailable or failed")) {
     return "basic-pitch가 설치되어 있지 않거나 MIDI 추출에 실패해 placeholder MIDI 파일을 생성했습니다.";
+  }
+  if (warning.includes("빠른 업로드 모드로 basic-pitch MIDI 추출을 건너뛰고")) {
+    return "빠른 업로드 모드로 MIDI 추출을 건너뛰고 placeholder MIDI 파일을 생성했습니다.";
   }
   return warning;
 }
