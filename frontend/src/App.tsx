@@ -988,6 +988,7 @@ function TrackControlsRow({
         <span
           className="panKnob"
           style={{ "--pan": state.pan } as CSSProperties}
+          onDoubleClick={() => onUpdate(name, { pan: 0 })}
         >
           <i />
           <small>L</small>
