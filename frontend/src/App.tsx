@@ -228,7 +228,7 @@ export default function App() {
         setAnalysis(firstSong?.analysis ?? null);
         setError(firstSong?.error ?? null);
       } catch (restoreError) {
-        if (mounted) setError(String(restoreError));
+        if (mounted) setError(normalizeErrorMessage(restoreError));
       } finally {
         if (mounted) setLibraryLoaded(true);
       }
@@ -263,7 +263,7 @@ export default function App() {
           }
         }
       } catch (pollError) {
-        const message = String(pollError);
+        const message = normalizeErrorMessage(pollError);
         setError(message);
         if (pollingSongId) {
           setSongs((prev) => prev.map((song) => (song.id === pollingSongId ? { ...song, error: message } : song)));
@@ -356,7 +356,7 @@ export default function App() {
       setJob(created);
       setSongs((prev) => sortSongs(prev.map((song) => (song.id === songId ? { ...song, jobId: created.id, job: created } : song))));
     } catch (uploadError) {
-      const message = String(uploadError);
+      const message = normalizeErrorMessage(uploadError);
       setError(message);
       setSongs((prev) => prev.map((song) => (song.id === songId ? { ...song, error: message } : song)));
     }
@@ -397,7 +397,7 @@ export default function App() {
       try {
         await deleteJob(backendJobId);
       } catch (deleteError) {
-        setError(String(deleteError));
+        setError(normalizeErrorMessage(deleteError));
         return;
       }
     }
@@ -598,7 +598,7 @@ export default function App() {
     );
     const failed = deleteResults.find((result) => result.status === "rejected");
     if (failed) {
-      setError(String(failed.reason));
+      setError(normalizeErrorMessage(failed.reason));
       return;
     }
 
@@ -876,7 +876,7 @@ export default function App() {
             <span>METRO <strong>{metronomeOn ? "ON" : "OFF"}</strong></span>
             <span>LOOP <strong>{repeatOn ? "ON" : "OFF"}</strong></span>
             <span>CHORD <strong>{currentChord}</strong></span>
-            {(error || job?.error) && <em>{error ?? job?.error}</em>}
+            {(error || job?.error) && <em>{normalizeErrorMessage(error ?? job?.error)}</em>}
           </div>
           {(job?.warnings.length || analysis?.warnings.length) ? (
             <div className="warnings">
@@ -1059,7 +1059,7 @@ function ModalLayer({
             <div className="meterBar">
               <div style={{ width: `${progress}%` }} />
             </div>
-            <p>{error ?? job?.error ?? message}</p>
+            <p>{error || job?.error ? normalizeErrorMessage(error ?? job?.error) : message}</p>
           </div>
         </section>
       )}
@@ -1530,6 +1530,20 @@ function writeLibraryMetadata(folders: LibraryFolder[], songs: LibrarySong[]) {
     };
   }
   window.localStorage.setItem(LIBRARY_STORAGE_KEY, JSON.stringify(metadata));
+}
+
+function normalizeErrorMessage(errorValue: unknown) {
+  const raw = errorValue instanceof Error ? errorValue.message : String(errorValue ?? "");
+  const withoutPrefix = raw.replace(/^Error:\s*/i, "").trim();
+  try {
+    const parsed = JSON.parse(withoutPrefix) as { detail?: string };
+    if (parsed.detail === "Method Not Allowed") {
+      return "백엔드 서버의 API가 아직 최신 코드로 실행되지 않았습니다. 서버를 재시작한 뒤 다시 시도하세요.";
+    }
+    return parsed.detail ?? withoutPrefix;
+  } catch {
+    return withoutPrefix;
+  }
 }
 
 function formatTime(seconds: number) {
