@@ -63,6 +63,16 @@ export function assetUrl(path: string | null): string | null {
   return path.startsWith("http") ? path : `${API_BASE}${path}`;
 }
 
+export function exportMixUrl(id: string): string {
+  return `${API_BASE}/api/jobs/${id}/export/mix`;
+}
+
+export function exportStemsUrl(id: string, stems: string[]): string {
+  const params = new URLSearchParams();
+  stems.forEach((stem) => params.append("stem", stem));
+  return `${API_BASE}/api/jobs/${id}/export/stems?${params.toString()}`;
+}
+
 async function readableError(response: Response): Promise<string> {
   const text = await response.text();
   try {

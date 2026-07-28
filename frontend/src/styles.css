@@ -1565,6 +1565,7 @@ button {
 }
 
 .addChoices button,
+.exportChoices button,
 .fileDropButton {
   min-height: 118px;
   display: grid;
@@ -1579,21 +1580,92 @@ button {
 }
 
 .addChoices button:hover,
+.exportChoices button:hover,
 .fileDropButton:hover {
   border-color: #83e5ef;
   filter: brightness(1.08);
 }
 
 .addChoices span,
+.exportChoices span,
 .fileDropButton span {
   font-size: 18px;
   font-weight: 800;
 }
 
 .addChoices small,
+.exportChoices small,
 .fileDropButton small {
   color: #bdbdbd;
   font-size: 12px;
+}
+
+.exportChoices {
+  display: grid;
+  grid-template-columns: minmax(150px, 0.85fr) minmax(240px, 1.15fr);
+  gap: 12px;
+}
+
+.exportChoices button:disabled {
+  cursor: default;
+  opacity: 0.55;
+  filter: none;
+}
+
+.stemExportBox {
+  min-height: 180px;
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  padding: 18px;
+  border: 1px solid #555555;
+  border-radius: 8px;
+  background: linear-gradient(#4a4a4a, #363636);
+  color: #eeeeee;
+}
+
+.stemChecks {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.stemChecks label {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 30px;
+  padding: 5px 8px;
+  border: 1px solid #4f4f4f;
+  border-radius: 5px;
+  background: #2d2d2d;
+  color: #eeeeee;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.stemChecks input {
+  accent-color: #69d7e6;
+}
+
+.stemChecks b {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+}
+
+.exportSubmit {
+  min-height: 42px !important;
+  align-content: center !important;
+  padding: 10px 14px !important;
+  border-color: #68d7e5 !important;
+}
+
+.modalError {
+  margin: 0;
+  color: #ffb8b8;
+  font-size: 13px;
+  font-weight: 800;
 }
 
 .fileDropButton {

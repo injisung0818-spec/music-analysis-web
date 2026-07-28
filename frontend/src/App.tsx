@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, MouseEvent as ReactMouseEvent } from "react";
-import { assetUrl, deleteJob, fetchAnalysis, fetchJob, fetchJobs, uploadAudio } from "./api";
+import { assetUrl, deleteJob, exportMixUrl, exportStemsUrl, fetchAnalysis, fetchJob, fetchJobs, uploadAudio } from "./api";
 import type { Analysis, JobResponse, StemName, TrackState } from "./types";
 import iconBass from "./assets/figma-icons/bass.svg";
 import iconDrums from "./assets/figma-icons/drums.svg";
@@ -132,7 +132,7 @@ type LibraryMetadata = {
   }>;
 };
 
-type ModalView = "add" | "upload" | null;
+type ModalView = "add" | "upload" | "export" | null;
 
 export default function App() {
   const [job, setJob] = useState<JobResponse | null>(null);
@@ -156,6 +156,8 @@ export default function App() {
   const [openSongMenuId, setOpenSongMenuId] = useState<string | null>(null);
   const [libraryLoaded, setLibraryLoaded] = useState(false);
   const [uploadFileName, setUploadFileName] = useState("");
+  const [exportStemSelection, setExportStemSelection] = useState<StemName[]>([]);
+  const [exportBusy, setExportBusy] = useState(false);
   const [libraryWidth, setLibraryWidth] = useState(286);
   const [trackControlsWidth, setTrackControlsWidth] = useState(620);
   const [editorHeight, setEditorHeight] = useState(294);
@@ -187,6 +189,7 @@ export default function App() {
   const transportKey = analysis ? `${analysis.key} ${modeLabel(analysis.mode)}` : "Cmin";
   const progress = Math.round((job?.progress ?? 0) * 100);
   const stems = analysis?.stems ?? stemPlaceholders();
+  const exportableStems = useMemo(() => analysis?.stems.filter((stem) => stem.audio_url).map((stem) => stem.name) ?? [], [analysis]);
   const orderedSongs = useMemo(() => sortSongs(songs), [songs]);
   const activeSongTitle = songs.find((song) => song.id === activeSongId)?.title ?? analysis?.original_filename ?? "노래 이름";
   const modalOpen = modalView !== null;
@@ -360,6 +363,68 @@ export default function App() {
       setError(message);
       setSongs((prev) => prev.map((song) => (song.id === songId ? { ...song, error: message } : song)));
     }
+  }
+
+  function openExportModal() {
+    if (!analysis) {
+      setError("내보낼 노래를 먼저 선택하거나 분석을 완료하세요.");
+      return;
+    }
+    setError(null);
+    setExportStemSelection(exportableStems);
+    setModalView("export");
+  }
+
+  async function downloadExport(url: string) {
+    const response = await fetch(url);
+    if (!response.ok) {
+      throw new Error(await exportErrorMessage(response));
+    }
+    const blob = await response.blob();
+    const href = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = href;
+    link.download = downloadNameFromHeader(response.headers.get("content-disposition"));
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(href);
+  }
+
+  async function exportWholeSong() {
+    if (!analysis) return;
+    setExportBusy(true);
+    setError(null);
+    try {
+      await downloadExport(exportMixUrl(analysis.job_id));
+      setModalView(null);
+    } catch (exportError) {
+      setError(normalizeErrorMessage(exportError));
+    } finally {
+      setExportBusy(false);
+    }
+  }
+
+  async function exportSelectedStems() {
+    if (!analysis) return;
+    if (!exportStemSelection.length) {
+      setError("내보낼 파트를 하나 이상 선택하세요.");
+      return;
+    }
+    setExportBusy(true);
+    setError(null);
+    try {
+      await downloadExport(exportStemsUrl(analysis.job_id, exportStemSelection));
+      setModalView(null);
+    } catch (exportError) {
+      setError(normalizeErrorMessage(exportError));
+    } finally {
+      setExportBusy(false);
+    }
+  }
+
+  function toggleExportStem(stem: StemName) {
+    setExportStemSelection((prev) => (prev.includes(stem) ? prev.filter((item) => item !== stem) : [...prev, stem]));
   }
 
   function selectSong(songId: string) {
@@ -685,7 +750,7 @@ export default function App() {
           <div className="toolbarSpacer wide" aria-hidden="true" />
           <div className="toolbarGroup outputTools">
             <button className="toolButton" data-tooltip="더보기" aria-label="더보기"><Icon name="more" /></button>
-            <button className="toolButton exportButton" data-tooltip="내보내기" aria-label="내보내기"><Icon name="upload" /></button>
+            <button className="toolButton exportButton" data-tooltip="내보내기" aria-label="내보내기" onClick={openExportModal} disabled={!analysis}><Icon name="upload" /></button>
             <button className="toolButton" data-tooltip="추가" aria-label="추가" onClick={() => setModalView("add")}><Icon name="plus" /></button>
           </div>
         </div>
@@ -893,10 +958,16 @@ export default function App() {
           job={job}
           progress={progress}
           error={error}
+          analysis={analysis}
+          exportStemSelection={exportStemSelection}
+          exportBusy={exportBusy}
           onClose={() => setModalView(null)}
           onAddFolder={addFolder}
           onOpenUpload={() => setModalView("upload")}
           onFile={handleFile}
+          onExportWhole={exportWholeSong}
+          onExportSelected={exportSelectedStems}
+          onToggleExportStem={toggleExportStem}
         />
       )}
     </main>
@@ -1000,23 +1071,36 @@ function ModalLayer({
   job,
   progress,
   error,
+  analysis,
+  exportStemSelection,
+  exportBusy,
   onClose,
   onAddFolder,
   onOpenUpload,
-  onFile
+  onFile,
+  onExportWhole,
+  onExportSelected,
+  onToggleExportStem
 }: {
   view: ModalView;
   fileName: string;
   job: JobResponse | null;
   progress: number;
   error: string | null;
+  analysis: Analysis | null;
+  exportStemSelection: StemName[];
+  exportBusy: boolean;
   onClose: () => void;
   onAddFolder: () => void;
   onOpenUpload: () => void;
   onFile: (file: File) => void | Promise<void>;
+  onExportWhole: () => void | Promise<void>;
+  onExportSelected: () => void | Promise<void>;
+  onToggleExportStem: (stem: StemName) => void;
 }) {
   const status = statusLabel(job?.status ?? "ready");
   const message = messageLabel(job?.message) ?? (fileName ? "파일 분석을 준비 중입니다" : "MP3 또는 WAV 파일을 선택하세요");
+  const exportableStems = analysis?.stems.filter((stem) => stem.audio_url) ?? [];
   return (
     <div className="modalOverlay" role="presentation">
       {view === "add" && (
@@ -1033,6 +1117,40 @@ function ModalLayer({
               <small>MP3/WAV 업로드</small>
             </button>
           </div>
+        </section>
+      )}
+
+      {view === "export" && (
+        <section className="modalPanel exportModal" role="dialog" aria-modal="true" aria-label="내보내기">
+          <button className="modalClose" aria-label="닫기" onClick={onClose}>×</button>
+          <strong>내보내기</strong>
+          <div className="exportChoices">
+            <button disabled={!analysis || exportBusy} onClick={() => void onExportWhole()}>
+              <span>전체</span>
+              <small>현재 열려있는 노래 믹스</small>
+            </button>
+            <div className="stemExportBox">
+              <span>파트별</span>
+              <small>여러 파트를 선택해서 ZIP으로 저장</small>
+              <div className="stemChecks">
+                {exportableStems.map((stem) => (
+                  <label key={stem.name}>
+                    <input
+                      type="checkbox"
+                      checked={exportStemSelection.includes(stem.name)}
+                      onChange={() => onToggleExportStem(stem.name)}
+                    />
+                    <b style={{ background: stem.color }} />
+                    {STEM_LABELS[stem.name]}
+                  </label>
+                ))}
+              </div>
+              <button className="exportSubmit" disabled={!analysis || exportBusy || !exportStemSelection.length} onClick={() => void onExportSelected()}>
+                {exportBusy ? "내보내는 중" : "선택한 파트 내보내기"}
+              </button>
+            </div>
+          </div>
+          {error && <p className="modalError">{error}</p>}
         </section>
       )}
 
@@ -1557,6 +1675,24 @@ function writeLibraryMetadata(folders: LibraryFolder[], songs: LibrarySong[]) {
     };
   }
   window.localStorage.setItem(LIBRARY_STORAGE_KEY, JSON.stringify(metadata));
+}
+
+async function exportErrorMessage(response: Response) {
+  const text = await response.text();
+  try {
+    const parsed = JSON.parse(text) as { detail?: string };
+    return parsed.detail ?? text;
+  } catch {
+    return text || response.statusText;
+  }
+}
+
+function downloadNameFromHeader(header: string | null) {
+  if (!header) return "export";
+  const encoded = header.match(/filename\*=utf-8''([^;]+)/i)?.[1];
+  if (encoded) return decodeURIComponent(encoded);
+  const plain = header.match(/filename="?([^";]+)"?/i)?.[1];
+  return plain || "export";
 }
 
 function normalizeErrorMessage(errorValue: unknown) {
