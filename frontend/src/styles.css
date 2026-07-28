@@ -1353,7 +1353,6 @@ button {
 
 .region {
   height: 100%;
-  margin: 0 0 0 clamp(6px, 0.3906vw, 10px);
   border-radius: clamp(12px, 0.7813vw, 20px);
   overflow: hidden;
   background: color-mix(in srgb, var(--accent), white 12%);
@@ -1362,7 +1361,7 @@ button {
 .regionWave {
   height: 100%;
   position: relative;
-  padding: 7px 16px;
+  padding: 7px 0;
 }
 
 .waveSvg {
