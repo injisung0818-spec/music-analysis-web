@@ -417,17 +417,7 @@ export default function App() {
     setError(null);
     try {
       if (exportSeparateStems) {
-        const selectedAssets = analysis.stems.filter((stem) => exportStemSelection.includes(stem.name));
-        for (const stem of selectedAssets) {
-          const audioUrl = stem.audio_url;
-          if (!audioUrl) continue;
-          const url = assetUrl(audioUrl);
-          if (url) {
-            const suffix = fileSuffixFromUrl(audioUrl) || ".m4a";
-            await downloadExport(url, `${safeFileBase(activeSongTitle)}-${stem.name}${suffix}`);
-            await waitForNextDownloadTick();
-          }
-        }
+        await downloadExport(exportStemsUrl(analysis.job_id, exportStemSelection, "zip"), `${safeFileBase(activeSongTitle)}-stems.zip`);
       } else {
         await downloadExport(exportStemsUrl(analysis.job_id, exportStemSelection, "mix"), `${safeFileBase(activeSongTitle)}-selected-stems.m4a`);
       }
@@ -1153,7 +1143,7 @@ function ModalLayer({
             </button>
             <div className="stemExportBox">
               <span>파트별</span>
-              <small>{exportSeparateStems ? "선택한 파트를 개별 파일로 저장" : "선택한 파트를 합쳐서 오디오 1개로 저장"}</small>
+              <small>{exportSeparateStems ? "선택한 파트를 ZIP 안에 개별 파일로 저장" : "선택한 파트를 합쳐서 오디오 1개로 저장"}</small>
               <div className="stemChecks">
                 {exportableStems.map((stem) => (
                   <label key={stem.name}>
@@ -1173,7 +1163,7 @@ function ModalLayer({
                   checked={exportSeparateStems}
                   onChange={(event) => onExportSeparateChange(event.target.checked)}
                 />
-                개별 파일로 내보내기
+                ZIP으로 개별 파일 내보내기
               </label>
               <button className="exportSubmit" disabled={!analysis || exportBusy || !exportStemSelection.length} onClick={() => void onExportSelected()}>
                 {exportBusy ? "내보내는 중" : "선택한 파트 내보내기"}
@@ -1727,16 +1717,6 @@ function downloadNameFromHeader(header: string | null, fallbackName = "export") 
 
 function safeFileBase(name: string) {
   return (name || "song").replace(/\.[^/.]+$/, "").replace(/[\\/:*?"<>|]/g, "_").trim() || "song";
-}
-
-function fileSuffixFromUrl(url: string) {
-  const clean = url.split("?")[0];
-  const match = clean.match(/\.[a-z0-9]+$/i);
-  return match?.[0] ?? "";
-}
-
-function waitForNextDownloadTick() {
-  return new Promise<void>((resolve) => window.setTimeout(resolve, 180));
 }
 
 function normalizeErrorMessage(errorValue: unknown) {
