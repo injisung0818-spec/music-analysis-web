@@ -286,6 +286,40 @@ def create_mix_export(paths: dict[str, Path], job_id: str, suffix: str) -> Path:
     return output
 
 
+def create_aligned_wav_export(source: Path, target: Path, duration: float) -> None:
+    ffmpeg = find_executable("ffmpeg")
+    if not ffmpeg:
+        raise HTTPException(status_code=503, detail="DAW용 개별 파트 내보내기에는 ffmpeg가 필요합니다.")
+    if duration <= 0:
+        raise HTTPException(status_code=500, detail="노래 길이 정보가 없어 파트를 정렬할 수 없습니다.")
+
+    cmd = [
+        ffmpeg,
+        "-y",
+        "-nostdin",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        str(source),
+        "-af",
+        f"apad,atrim=0:{duration:.6f}",
+        "-ar",
+        "44100",
+        "-ac",
+        "2",
+        "-map_metadata",
+        "-1",
+        "-c:a",
+        "pcm_s16le",
+        str(target),
+    ]
+    completed = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    if completed.returncode != 0 or not target.exists():
+        detail = completed.stderr.strip().splitlines()[-1] if completed.stderr.strip() else "파트 WAV 정렬 실패"
+        raise HTTPException(status_code=500, detail=detail)
+
+
 @app.get("/api/health")
 def health() -> dict[str, str]:
     return {"status": "ok", "app": "local-music-analysis"}
@@ -351,6 +385,7 @@ async def export_stems(job_id: str, stem: Annotated[list[str], Query()] = None, 
     if not selected:
         raise HTTPException(status_code=400, detail="내보낼 파트를 하나 이상 선택하세요.")
 
+    analysis = read_analysis_for_export(state)
     paths = resolve_stem_audio_paths(state, selected)
     if not paths:
         raise HTTPException(status_code=404, detail="선택한 파트의 오디오 파일이 없습니다.")
@@ -366,11 +401,25 @@ async def export_stems(job_id: str, stem: Annotated[list[str], Query()] = None, 
 
     export_dir = Path(tempfile.mkdtemp(prefix=f"{job_id}-stems-"))
     output = export_dir / "stems.zip"
+    duration = float(analysis.get("duration") or 0)
+    bpm = analysis.get("bpm")
+    key = analysis.get("key")
+    mode_label = analysis.get("mode")
     with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         for name in selected:
             path = paths.get(name)
             if path:
-                archive.write(path, arcname=f"{name}{path.suffix}")
+                aligned = export_dir / f"{name}.wav"
+                create_aligned_wav_export(path, aligned, duration)
+                archive.write(aligned, arcname=f"{name}.wav")
+        info = [
+            f"Title: {state.original_filename}",
+            f"BPM: {round(float(bpm), 3) if isinstance(bpm, (int, float)) else bpm or '--'}",
+            f"Key: {key or '--'} {mode_label or ''}".strip(),
+            f"Duration: {round(duration, 3)} seconds",
+            "Files: 44.1 kHz / 16-bit stereo WAV, same start point, same duration.",
+        ]
+        archive.writestr("tempo-info.txt", "\n".join(info) + "\n")
 
     return FileResponse(
         output,

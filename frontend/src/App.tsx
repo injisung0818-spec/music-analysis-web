@@ -1143,7 +1143,7 @@ function ModalLayer({
             </button>
             <div className="stemExportBox">
               <span>파트별</span>
-              <small>{exportSeparateStems ? "선택한 파트를 ZIP 안에 개별 파일로 저장" : "선택한 파트를 합쳐서 오디오 1개로 저장"}</small>
+              <small>{exportSeparateStems ? "선택한 파트를 DAW용 WAV ZIP으로 저장" : "선택한 파트를 합쳐서 오디오 1개로 저장"}</small>
               <div className="stemChecks">
                 {exportableStems.map((stem) => (
                   <label key={stem.name}>
@@ -1163,7 +1163,7 @@ function ModalLayer({
                   checked={exportSeparateStems}
                   onChange={(event) => onExportSeparateChange(event.target.checked)}
                 />
-                ZIP으로 개별 파일 내보내기
+                ZIP으로 개별 WAV 내보내기
               </label>
               <button className="exportSubmit" disabled={!analysis || exportBusy || !exportStemSelection.length} onClick={() => void onExportSelected()}>
                 {exportBusy ? "내보내는 중" : "선택한 파트 내보내기"}
