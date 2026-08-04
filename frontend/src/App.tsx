@@ -1143,7 +1143,7 @@ function ModalLayer({
             </button>
             <div className="stemExportBox">
               <span>파트별</span>
-              <small>{exportSeparateStems ? "선택한 파트를 DAW용 WAV ZIP으로 저장" : "선택한 파트를 합쳐서 오디오 1개로 저장"}</small>
+              <small>{exportSeparateStems ? "선택한 파트를 DAW용 WAV ZIP으로 저장 · Ableton Warp 끄기" : "선택한 파트를 합쳐서 오디오 1개로 저장"}</small>
               <div className="stemChecks">
                 {exportableStems.map((stem) => (
                   <label key={stem.name}>

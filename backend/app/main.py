@@ -29,6 +29,7 @@ JOBS_DIR = STORAGE_DIR / "jobs"
 ALLOWED_SUFFIXES = {".mp3", ".wav"}
 STALE_INCOMPLETE_JOB_SECONDS = 20 * 60
 EXPORT_STEMS = {"vocals", "drums", "bass", "guitar", "piano", "other"}
+EXPORT_SAMPLE_RATE = 44100
 
 
 class JobResponse(BaseModel):
@@ -293,6 +294,12 @@ def create_aligned_wav_export(source: Path, target: Path, duration: float) -> No
     if duration <= 0:
         raise HTTPException(status_code=500, detail="노래 길이 정보가 없어 파트를 정렬할 수 없습니다.")
 
+    sample_count = max(1, round(duration * EXPORT_SAMPLE_RATE))
+    filter_chain = (
+        f"aresample={EXPORT_SAMPLE_RATE}:first_pts=0,"
+        "asetpts=N/SR/TB,"
+        f"apad,atrim=start_sample=0:end_sample={sample_count}"
+    )
     cmd = [
         ffmpeg,
         "-y",
@@ -303,9 +310,9 @@ def create_aligned_wav_export(source: Path, target: Path, duration: float) -> No
         "-i",
         str(source),
         "-af",
-        f"apad,atrim=0:{duration:.6f}",
+        filter_chain,
         "-ar",
-        "44100",
+        str(EXPORT_SAMPLE_RATE),
         "-ac",
         "2",
         "-map_metadata",
@@ -402,6 +409,7 @@ async def export_stems(job_id: str, stem: Annotated[list[str], Query()] = None, 
     export_dir = Path(tempfile.mkdtemp(prefix=f"{job_id}-stems-"))
     output = export_dir / "stems.zip"
     duration = float(analysis.get("duration") or 0)
+    sample_count = max(1, round(duration * EXPORT_SAMPLE_RATE)) if duration > 0 else 0
     bpm = analysis.get("bpm")
     key = analysis.get("key")
     mode_label = analysis.get("mode")
@@ -417,7 +425,9 @@ async def export_stems(job_id: str, stem: Annotated[list[str], Query()] = None, 
             f"BPM: {round(float(bpm), 3) if isinstance(bpm, (int, float)) else bpm or '--'}",
             f"Key: {key or '--'} {mode_label or ''}".strip(),
             f"Duration: {round(duration, 3)} seconds",
-            "Files: 44.1 kHz / 16-bit stereo WAV, same start point, same duration.",
+            f"Sample Count: {sample_count} samples at {EXPORT_SAMPLE_RATE} Hz",
+            "Files: 44.1 kHz / 16-bit stereo WAV, same start point, exact same sample length.",
+            "Ableton: set the project tempo to the BPM above and turn Warp OFF for all imported stem WAV files.",
         ]
         archive.writestr("tempo-info.txt", "\n".join(info) + "\n")
 
