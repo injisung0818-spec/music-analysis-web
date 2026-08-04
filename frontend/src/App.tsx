@@ -157,6 +157,7 @@ export default function App() {
   const [libraryLoaded, setLibraryLoaded] = useState(false);
   const [uploadFileName, setUploadFileName] = useState("");
   const [exportStemSelection, setExportStemSelection] = useState<StemName[]>([]);
+  const [exportSeparateStems, setExportSeparateStems] = useState(false);
   const [exportBusy, setExportBusy] = useState(false);
   const [libraryWidth, setLibraryWidth] = useState(286);
   const [trackControlsWidth, setTrackControlsWidth] = useState(620);
@@ -372,10 +373,11 @@ export default function App() {
     }
     setError(null);
     setExportStemSelection(exportableStems);
+    setExportSeparateStems(false);
     setModalView("export");
   }
 
-  async function downloadExport(url: string) {
+  async function downloadExport(url: string, fallbackName = "export") {
     const response = await fetch(url);
     if (!response.ok) {
       throw new Error(await exportErrorMessage(response));
@@ -384,7 +386,7 @@ export default function App() {
     const href = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = href;
-    link.download = downloadNameFromHeader(response.headers.get("content-disposition"));
+    link.download = downloadNameFromHeader(response.headers.get("content-disposition"), fallbackName);
     document.body.appendChild(link);
     link.click();
     link.remove();
@@ -414,7 +416,21 @@ export default function App() {
     setExportBusy(true);
     setError(null);
     try {
-      await downloadExport(exportStemsUrl(analysis.job_id, exportStemSelection));
+      if (exportSeparateStems) {
+        const selectedAssets = analysis.stems.filter((stem) => exportStemSelection.includes(stem.name));
+        for (const stem of selectedAssets) {
+          const audioUrl = stem.audio_url;
+          if (!audioUrl) continue;
+          const url = assetUrl(audioUrl);
+          if (url) {
+            const suffix = fileSuffixFromUrl(audioUrl) || ".m4a";
+            await downloadExport(url, `${safeFileBase(activeSongTitle)}-${stem.name}${suffix}`);
+            await waitForNextDownloadTick();
+          }
+        }
+      } else {
+        await downloadExport(exportStemsUrl(analysis.job_id, exportStemSelection, "mix"), `${safeFileBase(activeSongTitle)}-selected-stems.m4a`);
+      }
       setModalView(null);
     } catch (exportError) {
       setError(normalizeErrorMessage(exportError));
@@ -960,6 +976,7 @@ export default function App() {
           error={error}
           analysis={analysis}
           exportStemSelection={exportStemSelection}
+          exportSeparateStems={exportSeparateStems}
           exportBusy={exportBusy}
           onClose={() => setModalView(null)}
           onAddFolder={addFolder}
@@ -968,6 +985,7 @@ export default function App() {
           onExportWhole={exportWholeSong}
           onExportSelected={exportSelectedStems}
           onToggleExportStem={toggleExportStem}
+          onExportSeparateChange={setExportSeparateStems}
         />
       )}
     </main>
@@ -1073,6 +1091,7 @@ function ModalLayer({
   error,
   analysis,
   exportStemSelection,
+  exportSeparateStems,
   exportBusy,
   onClose,
   onAddFolder,
@@ -1080,7 +1099,8 @@ function ModalLayer({
   onFile,
   onExportWhole,
   onExportSelected,
-  onToggleExportStem
+  onToggleExportStem,
+  onExportSeparateChange
 }: {
   view: ModalView;
   fileName: string;
@@ -1089,6 +1109,7 @@ function ModalLayer({
   error: string | null;
   analysis: Analysis | null;
   exportStemSelection: StemName[];
+  exportSeparateStems: boolean;
   exportBusy: boolean;
   onClose: () => void;
   onAddFolder: () => void;
@@ -1097,6 +1118,7 @@ function ModalLayer({
   onExportWhole: () => void | Promise<void>;
   onExportSelected: () => void | Promise<void>;
   onToggleExportStem: (stem: StemName) => void;
+  onExportSeparateChange: (separate: boolean) => void;
 }) {
   const status = statusLabel(job?.status ?? "ready");
   const message = messageLabel(job?.message) ?? (fileName ? "파일 분석을 준비 중입니다" : "MP3 또는 WAV 파일을 선택하세요");
@@ -1131,7 +1153,7 @@ function ModalLayer({
             </button>
             <div className="stemExportBox">
               <span>파트별</span>
-              <small>여러 파트를 선택해서 ZIP으로 저장</small>
+              <small>{exportSeparateStems ? "선택한 파트를 개별 파일로 저장" : "선택한 파트를 합쳐서 오디오 1개로 저장"}</small>
               <div className="stemChecks">
                 {exportableStems.map((stem) => (
                   <label key={stem.name}>
@@ -1145,6 +1167,14 @@ function ModalLayer({
                   </label>
                 ))}
               </div>
+              <label className="exportModeToggle">
+                <input
+                  type="checkbox"
+                  checked={exportSeparateStems}
+                  onChange={(event) => onExportSeparateChange(event.target.checked)}
+                />
+                개별 파일로 내보내기
+              </label>
               <button className="exportSubmit" disabled={!analysis || exportBusy || !exportStemSelection.length} onClick={() => void onExportSelected()}>
                 {exportBusy ? "내보내는 중" : "선택한 파트 내보내기"}
               </button>
@@ -1687,12 +1717,26 @@ async function exportErrorMessage(response: Response) {
   }
 }
 
-function downloadNameFromHeader(header: string | null) {
-  if (!header) return "export";
+function downloadNameFromHeader(header: string | null, fallbackName = "export") {
+  if (!header) return fallbackName;
   const encoded = header.match(/filename\*=utf-8''([^;]+)/i)?.[1];
   if (encoded) return decodeURIComponent(encoded);
   const plain = header.match(/filename="?([^";]+)"?/i)?.[1];
-  return plain || "export";
+  return plain || fallbackName;
+}
+
+function safeFileBase(name: string) {
+  return (name || "song").replace(/\.[^/.]+$/, "").replace(/[\\/:*?"<>|]/g, "_").trim() || "song";
+}
+
+function fileSuffixFromUrl(url: string) {
+  const clean = url.split("?")[0];
+  const match = clean.match(/\.[a-z0-9]+$/i);
+  return match?.[0] ?? "";
+}
+
+function waitForNextDownloadTick() {
+  return new Promise<void>((resolve) => window.setTimeout(resolve, 180));
 }
 
 function normalizeErrorMessage(errorValue: unknown) {

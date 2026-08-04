@@ -254,6 +254,38 @@ def cleanup_export_path(path: Path) -> None:
     shutil.rmtree(path.parent, ignore_errors=True)
 
 
+def create_mix_export(paths: dict[str, Path], job_id: str, suffix: str) -> Path:
+    ffmpeg = find_executable("ffmpeg")
+    if not ffmpeg:
+        raise HTTPException(status_code=503, detail="오디오 합치기에는 ffmpeg가 필요합니다.")
+
+    export_dir = Path(tempfile.mkdtemp(prefix=f"{job_id}-{suffix}-"))
+    output = export_dir / f"{suffix}.m4a"
+    cmd = [ffmpeg, "-y", "-nostdin", "-hide_banner", "-loglevel", "error"]
+    for path in paths.values():
+        cmd.extend(["-i", str(path)])
+    inputs = "".join(f"[{index}:a]" for index in range(len(paths)))
+    cmd.extend([
+        "-filter_complex",
+        f"{inputs}amix=inputs={len(paths)}:duration=longest:dropout_transition=0,volume={len(paths)}[mix]",
+        "-map",
+        "[mix]",
+        "-c:a",
+        "aac",
+        "-b:a",
+        os.getenv("MUSIC_EXPORT_BITRATE", "160k"),
+        "-movflags",
+        "+faststart",
+        str(output),
+    ])
+    completed = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    if completed.returncode != 0 or not output.exists():
+        shutil.rmtree(export_dir, ignore_errors=True)
+        detail = completed.stderr.strip().splitlines()[-1] if completed.stderr.strip() else "오디오 합치기 실패"
+        raise HTTPException(status_code=500, detail=detail)
+    return output
+
+
 @app.get("/api/health")
 def health() -> dict[str, str]:
     return {"status": "ok", "app": "local-music-analysis"}
@@ -302,34 +334,7 @@ async def export_mix(job_id: str) -> FileResponse:
     if not paths:
         raise HTTPException(status_code=404, detail="내보낼 오디오 파일이 없습니다.")
 
-    ffmpeg = find_executable("ffmpeg")
-    if not ffmpeg:
-        raise HTTPException(status_code=503, detail="전체 내보내기에는 ffmpeg가 필요합니다.")
-
-    export_dir = Path(tempfile.mkdtemp(prefix=f"{job_id}-export-"))
-    output = export_dir / "mix.m4a"
-    cmd = [ffmpeg, "-y", "-nostdin", "-hide_banner", "-loglevel", "error"]
-    for path in paths.values():
-        cmd.extend(["-i", str(path)])
-    inputs = "".join(f"[{index}:a]" for index in range(len(paths)))
-    cmd.extend([
-        "-filter_complex",
-        f"{inputs}amix=inputs={len(paths)}:duration=longest:dropout_transition=0,volume={len(paths)}[mix]",
-        "-map",
-        "[mix]",
-        "-c:a",
-        "aac",
-        "-b:a",
-        os.getenv("MUSIC_EXPORT_BITRATE", "160k"),
-        "-movflags",
-        "+faststart",
-        str(output),
-    ])
-    completed = subprocess.run(cmd, capture_output=True, text=True, check=False)
-    if completed.returncode != 0 or not output.exists():
-        shutil.rmtree(export_dir, ignore_errors=True)
-        detail = completed.stderr.strip().splitlines()[-1] if completed.stderr.strip() else "전체 믹스 생성 실패"
-        raise HTTPException(status_code=500, detail=detail)
+    output = create_mix_export(paths, job_id, "mix")
 
     return FileResponse(
         output,
@@ -340,7 +345,7 @@ async def export_mix(job_id: str) -> FileResponse:
 
 
 @app.get("/api/jobs/{job_id}/export/stems")
-async def export_stems(job_id: str, stem: Annotated[list[str], Query()] = None) -> FileResponse:
+async def export_stems(job_id: str, stem: Annotated[list[str], Query()] = None, mode: str = "mix") -> FileResponse:
     state = await store.get(job_id)
     selected = [item for item in dict.fromkeys(stem or []) if item in EXPORT_STEMS]
     if not selected:
@@ -349,6 +354,15 @@ async def export_stems(job_id: str, stem: Annotated[list[str], Query()] = None) 
     paths = resolve_stem_audio_paths(state, selected)
     if not paths:
         raise HTTPException(status_code=404, detail="선택한 파트의 오디오 파일이 없습니다.")
+
+    if mode == "mix":
+        output = create_mix_export(paths, job_id, "selected-stems")
+        return FileResponse(
+            output,
+            media_type="audio/mp4",
+            filename=safe_download_name(state.original_filename, "-selected-stems.m4a"),
+            background=BackgroundTask(cleanup_export_path, output),
+        )
 
     export_dir = Path(tempfile.mkdtemp(prefix=f"{job_id}-stems-"))
     output = export_dir / "stems.zip"

@@ -67,9 +67,10 @@ export function exportMixUrl(id: string): string {
   return `${API_BASE}/api/jobs/${id}/export/mix`;
 }
 
-export function exportStemsUrl(id: string, stems: string[]): string {
+export function exportStemsUrl(id: string, stems: string[], mode = "mix"): string {
   const params = new URLSearchParams();
   stems.forEach((stem) => params.append("stem", stem));
+  params.set("mode", mode);
   return `${API_BASE}/api/jobs/${id}/export/stems?${params.toString()}`;
 }
 
