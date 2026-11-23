@@ -15,5 +15,11 @@ services:
         value: https://your-netlify-site.netlify.app
       - key: MUSIC_FAST_UPLOAD
         value: "1"
-      - key: MUSIC_STEM_BITRATE
-        value: 80k
+      - key: MUSIC_ENABLE_DEMUCS
+        value: "0"
+      - key: MUSIC_MAX_UPLOAD_MB
+        value: "40"
+      - key: MUSIC_MAX_DURATION_SECONDS
+        value: "300"
+      - key: MUSIC_MAX_PENDING_JOBS
+        value: "2"

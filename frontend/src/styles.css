@@ -1524,6 +1524,8 @@ button {
 .modalPanel {
   position: relative;
   width: min(430px, calc(100vw - 40px));
+  max-height: calc(100vh - 40px);
+  overflow: auto;
   display: grid;
   gap: 18px;
   padding: 24px;
@@ -1688,11 +1690,20 @@ button {
 
 .fileDropButton {
   min-height: 110px;
+  position: relative;
+  overflow: hidden;
   text-align: center;
 }
 
 .fileDropButton input {
-  display: none;
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  opacity: 0;
+  cursor: pointer;
 }
 
 .uploadStatus {
@@ -1716,4 +1727,67 @@ button {
   margin: 0;
   color: #a8a8a8;
   line-height: 1.4;
+}
+
+.modalSelect {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  color: #dedede;
+}
+
+.modalSelect select {
+  padding: 5px 9px;
+  border: 1px solid #666;
+  border-radius: 5px;
+  background: #292929;
+  color: #eee;
+}
+
+.exportActions {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+}
+
+.exportActions button,
+.stemExportRow button {
+  min-height: 36px;
+  padding: 6px 10px;
+}
+
+.stemExportRow {
+  display: flex;
+  gap: 4px;
+}
+
+.stemExportRow label {
+  flex: 1;
+}
+
+.separationNotice {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 6px 12px;
+  color: #ade7ee;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.separationNotice.failed,
+.uploadStatus .separationNotice.failed {
+  color: #ffb8b8;
+}
+
+.exportModal {
+  width: min(620px, calc(100vw - 40px));
+}
+
+@media (max-width: 640px) {
+  .exportChoices {
+    grid-template-columns: 1fr;
+  }
 }

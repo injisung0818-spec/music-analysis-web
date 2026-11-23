@@ -2,7 +2,11 @@ FROM python:3.11-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1
+    PIP_NO_CACHE_DIR=1 \
+    OMP_NUM_THREADS=2 \
+    MUSIC_ENABLE_DEMUCS=0
+
+ARG INSTALL_AUDIO_MODELS=0
 
 WORKDIR /app
 
@@ -15,7 +19,11 @@ COPY requirements-optional.txt /app/requirements-optional.txt
 
 RUN pip install --upgrade pip \
     && pip install -r /app/requirements.txt \
-    && pip install -r /app/requirements-optional.txt
+    && if [ "$INSTALL_AUDIO_MODELS" = "1" ]; then \
+           pip install -r /app/requirements-optional.txt; \
+       else \
+           pip install "librosa>=0.10"; \
+       fi
 
 COPY app /app/app
 

@@ -19,17 +19,17 @@
 
 ## 주요 기능
 
-| 기능 | 설명 |
-| --- | --- |
-| MP3 / WAV 업로드 | 두 형식의 오디오 파일을 업로드해 비동기 작업으로 처리합니다. |
-| 6-스템 분리 | Demucs `htdemucs_6s`가 설치된 경우 보컬, 드럼, 베이스, 기타, 피아노, 기타(Other)로 분리합니다. |
-| 음악 정보 분석 | `librosa` 기반으로 길이, BPM, 비트 그리드, 키/모드, 크로마 기반 코드 타임라인을 계산합니다. |
-| MIDI 파일 생성 | Basic Pitch를 사용할 수 있으면 스템별 MIDI를 추출합니다. 기본 빠른 모드에서는 즉시 사용할 수 있는 placeholder MIDI를 만듭니다. |
-| DAW형 플레이어 | 스템별 음소거·솔로·볼륨·팬, 파형 레인, 재생 위치, 메트로놈과 코드 표시를 제공합니다. |
-| 라이브러리 | 브라우저 로컬 저장소를 이용해 작업 이름, 폴더, 고정 상태를 유지하고 이전 완료 작업을 다시 불러옵니다. |
-| 내보내기 | 선택한 스템의 믹스 오디오 또는 DAW에 가져가기 좋은 정렬된 개별 스템 ZIP을 생성합니다. |
-| 저장 공간 최적화 | `ffmpeg`가 있으면 stem WAV를 AAC `.m4a`로 압축하고, 원본·중간 파일·무음 fallback 파일을 정리합니다. |
-| 안전한 대체 동작 | 선택 도구가 없어도 서버가 중단되지 않으며, 결과와 경고를 함께 반환합니다. |
+| 기능             | 설명                                                                                                                           |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| MP3 / WAV 업로드 | 두 형식의 오디오 파일을 업로드해 비동기 작업으로 처리합니다.                                                                   |
+| 6-스템 분리      | Demucs `htdemucs_6s`가 설치된 경우 보컬, 드럼, 베이스, 기타, 피아노, 기타(Other)로 분리합니다.                                 |
+| 음악 정보 분석   | `librosa` 기반으로 길이, BPM, 비트 그리드, 키/모드, 크로마 기반 코드 타임라인을 계산합니다.                                    |
+| MIDI 파일 생성   | Basic Pitch를 사용할 수 있으면 스템별 MIDI를 추출합니다. 기본 빠른 모드에서는 즉시 사용할 수 있는 placeholder MIDI를 만듭니다. |
+| DAW형 플레이어   | 스템별 음소거·솔로·볼륨·팬, 파형 레인, 재생 위치, 메트로놈과 코드 표시를 제공합니다.                                           |
+| 라이브러리       | 브라우저 로컬 저장소를 이용해 작업 이름, 폴더, 고정 상태를 유지하고 이전 완료 작업을 다시 불러옵니다.                          |
+| 내보내기         | Instrumental, 전체·선택 믹스, 개별 스템, 스템 ZIP을 WAV·FLAC·M4A로 내보냅니다.                                          |
+| 저장 공간 최적화 | 분리된 PCM WAV를 보존하고, FLAC·M4A는 다운로드할 때 생성합니다.                            |
+| 안전한 대체 동작 | 분리 실패 시 원인을 표시하고, 원본의 BPM·키·코드 분석은 계속합니다.                                                      |
 
 ## 처리 흐름
 
@@ -39,19 +39,19 @@ MP3/WAV 업로드
   → 6-스템 분리 (Demucs)
   → BPM · 키 · 코드 · 파형 분석 (librosa)
   → MIDI 추출 (Basic Pitch)
-  → 압축 · 결과 저장 · 브라우저에서 재생/내보내기
+  → PCM WAV 저장 · 브라우저에서 재생/내보내기
 ```
 
-괄호 안의 도구는 선택 설치 항목입니다. 설치되지 않은 환경에서도 작업은 완료되지만, 실제 분리·정밀 분석·MIDI 추출 대신 대체 결과가 제공될 수 있습니다. 화면과 API의 `warnings`로 적용된 대체 동작을 확인할 수 있습니다.
+Demucs를 실행할 수 없으면 스템 분리 오류가 표시됩니다. 키·코드 또는 MIDI에 대체 결과가 쓰인 경우에는 화면과 API의 `warnings`에서 확인할 수 있습니다.
 
 ## 빠른 시작
 
 ### 요구 사항
 
 - macOS, Linux 또는 Windows 환경
-- Python 3.11 권장 (실행 스크립트는 `python3`도 지원)
+- Python 3.11 (`start.command` 사용 시)
 - Node.js 18 이상 및 npm
-- `ffmpeg` 권장 — MP3 변환과 `.m4a` 압축 저장에 사용
+- `ffmpeg` 권장 — MP3 변환, 오디오 믹스, FLAC·M4A 내보내기에 사용
 
 ### 가장 쉬운 실행 방법 (macOS)
 
@@ -61,7 +61,7 @@ MP3/WAV 업로드
 ./start.command
 ```
 
-준비가 끝나면 브라우저에서 `http://localhost:5173`이 열립니다. 실행 중인 터미널을 종료하면 이 스크립트가 시작한 서버도 함께 종료됩니다.
+준비가 끝나면 브라우저에서 `http://localhost:8282`이 열립니다. 실행 중인 터미널을 종료하면 이 스크립트가 시작한 서버도 함께 종료됩니다.
 
 ### 수동 실행
 
@@ -83,7 +83,7 @@ npm install
 npm run dev
 ```
 
-브라우저에서 [http://localhost:5173](http://localhost:5173)을 엽니다. 개발 서버는 `/api` 요청을 `http://localhost:8000`으로 전달합니다.
+브라우저에서 [http://localhost:8282](http://localhost:8282)을 엽니다. 개발 서버는 `/api` 요청을 `http://localhost:8000`으로 전달합니다.
 
 ### 권장 분석 도구 설치
 
@@ -97,16 +97,18 @@ brew install ffmpeg
 pip install -r backend/requirements-optional.txt
 ```
 
-첫 Demucs 또는 Basic Pitch 실행은 모델 다운로드 때문에 시간이 오래 걸릴 수 있습니다.
+macOS Apple Silicon에서는 Python 3.11과 네이티브 arm64 PyTorch를 사용합니다. `start.command`는 가상환경에 필요한 패키지가 없으면 설치 여부를 묻고, Demucs 실행과 모델 캐시를 확인합니다. `htdemucs_6s`는 첫 분리 작업에서 모델을 내려받으므로 인터넷과 캐시 저장 공간이 필요합니다. 모델을 먼저 준비하려면 다음을 실행하세요.
+
+```bash
+backend/.venv311/bin/python -c 'from demucs.pretrained import get_model; print(get_model("htdemucs_6s").sources)'
+```
 
 ## 사용 방법
 
-1. 화면의 업로드 메뉴에서 `.mp3` 또는 `.wav` 파일을 선택합니다.
-2. 진행 상태를 보며 변환, stem 분리, 분석, MIDI 생성이 끝날 때까지 기다립니다.
-3. 타임라인을 재생하면서 파트별 음소거·솔로·볼륨·팬을 조절하고 BPM, 키, 코드 진행을 확인합니다.
-4. 내보내기에서 원하는 스템을 고른 뒤 믹스 파일 또는 개별 stem ZIP을 내려받습니다.
-
-완료된 작업은 서버의 저장소와 브라우저 라이브러리에 남습니다. 더 이상 필요하지 않은 곡은 라이브러리에서 삭제해 디스크 공간을 비울 수 있습니다.
+1. 업로드 창에서 Standard 또는 High Quality를 고르고 MP3/WAV 파일을 선택합니다. Standard는 shifts 1·overlap 0.25, High Quality는 shifts 3·overlap 0.50으로 분리합니다. High Quality는 처리 시간이 길고 개선 폭은 곡마다 다릅니다.
+2. 분리 상태를 확인합니다. 분리에 실패한 곡은 오류와 BPM·키·코드 분석을 볼 수 있습니다. 스템 재생과 스템 내보내기는 6개 스템이 모두 준비된 곡에서 사용할 수 있습니다.
+3. 내보내기에서 출력 형식을 고른 뒤 **Instrumental 다운로드**, 전체 믹스, 개별 스템 또는 **6개 스템 ZIP 다운로드**를 사용합니다. Instrumental은 보컬을 제외한 5개 스템을 합성합니다. 스템 합이 피크 한도를 넘을 때만 전체에 같은 감쇠를 적용합니다. 내보내기에는 플레이어의 Solo·Mute·Volume·Pan 설정이 적용되지 않습니다.
+4. DAW 편집에는 샘플 정렬을 유지하는 WAV 또는 FLAC을 사용하세요. WAV는 모델이 생성한 24비트 PCM을 그대로 제공하고, FLAC은 같은 PCM 샘플을 압축합니다. AAC로만 저장된 이전 작업은 그대로 변환할 수 있으며 손실된 신호는 복원할 수 없습니다. 이전 작업의 파형은 새로 분리할 때 생성됩니다.
 
 ## 결과물과 저장 위치
 
@@ -117,12 +119,12 @@ backend/storage/jobs/<job_id>/
 ├── job.json                # 작업 상태와 경고
 ├── analysis.json           # BPM, 키, 코드, 파형, asset URL
 ├── stems/
-│   ├── vocals.m4a          # ffmpeg가 없으면 .wav
-│   ├── drums.m4a
-│   ├── bass.m4a
-│   ├── guitar.m4a
-│   ├── piano.m4a
-│   └── other.m4a
+│   ├── vocals.wav          # 분리 성공 시 24-bit PCM
+│   ├── drums.wav
+│   ├── bass.wav
+│   ├── guitar.wav
+│   ├── piano.wav
+│   └── other.wav
 └── midi/
     ├── vocals.mid
     ├── drums.mid
@@ -132,16 +134,69 @@ backend/storage/jobs/<job_id>/
     └── other.mid
 ```
 
+분리 모델은 자체 샘플레이트와 채널 구성으로 출력합니다. 현재 모델에서 스테레오 44.1kHz 24비트 WAV 6개는 곡 1분당 약 95MB를 사용합니다. 변환 중간 파일과 내보내기 임시 파일은 정리되며, 저장된 WAV는 라이브러리에서 곡을 삭제할 때 제거됩니다.
+
 분리와 분석 품질은 원본 믹스, 설치된 모델과 도구, 컴퓨팅 자원에 따라 달라집니다. 코드·키 추정과 자동 MIDI는 창작/편곡의 출발점으로 확인하고, 상업적·정밀 작업 전에는 귀로 검토하세요.
+
+## Apple Silicon 가속
+
+업로드 창의 분리 엔진에서 **PyTorch MPS** 또는 **Fast · MLX**를 선택할 수 있습니다. 서버 기본값은 기존 PyTorch 경로입니다. Standard와 High Quality는 어느 엔진에서도 같은 shifts와 overlap 설정을 사용합니다. 가속 엔진을 실행하거나 결과를 검증하는 데 실패하면, 오류를 표시하고 같은 품질 설정으로 PyTorch CPU에서 다시 시도합니다.
+
+PyTorch MPS는 기존 PyTorch 가상환경을 사용합니다. 새 환경에서 Fast · MLX를 준비하려면 별도의 가상환경에 검증한 버전을 설치합니다.
+
+```bash
+python3.11 -m venv backend/.venv-mlx
+backend/.venv-mlx/bin/python -m pip install 'demucs-mlx==1.6.1'
+```
+
+첫 MLX 분리에서는 `htdemucs_6s`의 별도 가중치를 내려받습니다. 기본 위치는 `~/.cache/demucs-mlx`입니다. **스템만 분리**를 선택하면 BPM·키·코드 및 MIDI를 생략합니다. 스템 파형과 내보내기는 사용할 수 있습니다.
+
+같은 입력·엔진·모델·품질로 완료된 WAV가 남아 있으면 새 작업에서 이를 재사용합니다. 파일 이름이나 분석·MIDI 옵션이 바뀌어도 이미 분리된 WAV는 재사용할 수 있습니다. 각 항목은 라이브러리에서 개별 삭제할 수 있습니다.
+
+### M5 16GB 벤치마크
+
+같은 60초 합성 MP3로 테스트했습니다. 전체 처리 시간은 업로드 대기열과 다운로드를 제외하고 WAV 변환부터 결과 저장까지이며, 실제 Basic Pitch 추출을 포함했습니다. 첫 작업은 새 앱 프로세스 기준이며, 가중치와 운영체제의 GPU 캐시가 준비된 상태에서 측정했습니다.
+
+| 처리 단계 | 변경 전 CPU 첫 작업 / 반복 | 변경 후 MLX 첫 작업 / 반복 |
+| --- | ---: | ---: |
+| MP3 → WAV | 0.09초 / 0.06초 | 0.08초 / 0.06초 |
+| 분리 전체 (모델 시작·추론·WAV 저장·검증) | 13.69초 / 13.43초 | 2.90초 / 2.71초 |
+| BPM·키·코드 및 스템 파형 | 3.50초 / 1.95초 | 3.41초 / 1.79초 |
+| 실제 MIDI 추출 | 3.24초 / 2.21초 | 3.31초 / 2.16초 |
+| 결과 저장 | 0.002초 / 0.002초 | 0.002초 / 0.002초 |
+| 전체 작업 | 20.52초 / 17.65초 | 9.71초 / 6.72초 |
+| Instrumental WAV 내보내기 | 0.13초 / 0.13초 | 0.12초 / 0.12초 |
+
+별도 추론 벤치마크는 같은 입력의 WAV와 Standard 설정을 사용했습니다. 첫 추론과 같은 프로세스 내 반복 두 번의 중앙값을 측정했습니다. 메모리는 macOS `/usr/bin/time -l`의 프로세스 최대 메모리 풋프린트입니다.
+
+| 엔진 | 모델 로드 | 첫 추론 | 모델 준비 후 반복 | 최대 메모리 |
+| --- | ---: | ---: | ---: | ---: |
+| PyTorch CPU | 0.24초 | 12.14초 | 13.49초 | 2.14 GiB |
+| PyTorch MPS | 0.19초 | 10.29초 | 5.96초 | 3.89 GiB |
+| MLX FP32 | 0.11초 | 7.88초 | 2.59초 | 5.07 GiB |
+
+세 엔진 모두 6개 스테레오 44.1kHz 24비트 PCM WAV를 채널당 2,646,000샘플로 출력했습니다. Standard에서 CPU 스템과 비교한 파형 SNR은 MPS 96.9–123.4dB, MLX 44.1–60.9dB였습니다. High Quality에서 같은 시프트 시드로 비교한 MLX 결과는 49.7–61.3dB였으며, 6개 파일의 길이와 포맷도 일치했습니다. SNR은 CPU 출력을 기준으로 한 파형 일치도입니다.
+
+MLX의 스템 전용 작업은 2.81초, 재사용한 스템 전용 API 요청은 0.32초였습니다. 180초 음원은 MLX에서 7.03초, 최대 6.56 GiB로 분리했습니다. 가속 모델은 작업마다 별도 프로세스에서 불러오고 종료 시 해제합니다. 모델 최초 다운로드 속도, 실제 Suno 음원의 청감 품질, 최대 길이 20분의 메모리 사용량은 미검증입니다.
 
 ## 환경 변수
 
-| 이름 | 기본값 | 설명 |
-| --- | --- | --- |
-| `MUSIC_FAST_UPLOAD` | `1` | `1`이면 시간이 오래 걸리는 Basic Pitch 추론을 건너뛰고 placeholder MIDI를 생성합니다. 실제 MIDI 추출은 `0`으로 설정합니다. |
-| `MUSIC_STEM_BITRATE` | `80k` | `ffmpeg` 사용 시 stem `.m4a`의 AAC 비트레이트입니다. 예: `96k`, `160k`. 값이 높을수록 파일은 커집니다. |
-| `MUSIC_APP_DATA_DIR` | `backend/storage` | 업로드 파일과 작업 결과를 저장할 디렉터리입니다. |
-| `CORS_ORIGINS` | localhost만 허용 | 쉼표로 구분한 배포 프론트엔드 origin입니다. 예: `https://example.netlify.app`. |
+| 이름                 | 기본값            | 설명                                                                                                                       |
+| -------------------- | ----------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `MUSIC_FAST_UPLOAD`  | `1`               | `1`이면 시간이 오래 걸리는 Basic Pitch 추론을 건너뛰고 placeholder MIDI를 생성합니다. 실제 MIDI 추출은 `0`으로 설정합니다. |
+| `MUSIC_STEM_BITRATE` | `256k` | 개별 스템 및 믹스 M4A의 AAC 비트레이트 |
+| `MUSIC_EXPORT_BITRATE` | 스템 비트레이트와 동일 | 믹스·Instrumental M4A에만 적용할 AAC 비트레이트 |
+| `MUSIC_ENABLE_DEMUCS` | 로컬 `1` / Docker·Render `0` | 분리 활성화 |
+| `MUSIC_DEMUCS_DEVICE` | `cpu` | 기본 PyTorch 추론 장치 |
+| `MUSIC_SEPARATION_ENGINE` | `torch` | 서버 기본 엔진. `torch`, `mps`, `mlx` |
+| `MUSIC_MLX_PYTHON` | `backend/.venv-mlx/bin/python` | 별도 MLX 가상환경의 Python 경로 |
+| `DEMUCS_MLX_CACHE_DIR` | `~/.cache/demucs-mlx` | MLX 가중치 저장 경로 |
+| `MUSIC_DEMUCS_REPO` | 모델 기본 캐시 | 이미 준비한 Demucs 모델 저장소 경로 |
+| `MUSIC_DEMUCS_TIMEOUT_SECONDS` | `3600` | 모델 준비와 분리의 최대 실행 시간 |
+| `MUSIC_MAX_UPLOAD_MB` / `MUSIC_MAX_DURATION_SECONDS` | `150` / `1200` | 업로드 최대 크기와 오디오 최대 길이 |
+| `MUSIC_MAX_PENDING_JOBS` | `8` | 실행 중인 작업을 포함한 최대 대기열 크기 |
+| `MUSIC_APP_DATA_DIR` | `backend/storage` | 업로드 파일과 작업 결과를 저장할 디렉터리입니다.                                                                           |
+| `CORS_ORIGINS`       | localhost만 허용  | 쉼표로 구분한 배포 프론트엔드 origin입니다. 예: `https://example.netlify.app`.                                             |
 
 전체 MIDI 추출 모드로 백엔드를 실행하는 예시입니다.
 
@@ -152,17 +207,18 @@ MUSIC_FAST_UPLOAD=0 uvicorn app.main:app --reload --port 8000
 
 ## API 요약
 
-| 메서드 | 경로 | 용도 |
-| --- | --- | --- |
-| `GET` | `/api/health` | 서버 상태 확인 |
-| `POST` | `/api/jobs` | `file` multipart 필드로 MP3/WAV 업로드 및 분석 작업 생성 |
-| `GET` | `/api/jobs` | 저장된 작업 목록 조회 |
-| `GET` | `/api/jobs/{job_id}` | 진행 상태·경고 조회 |
-| `GET` | `/api/jobs/{job_id}/analysis` | 완료된 분석 데이터 조회 |
-| `GET` | `/api/jobs/{job_id}/assets/{asset_path}` | stem 또는 MIDI 에셋 내려받기 |
-| `GET` | `/api/jobs/{job_id}/export/mix` | 전체 stem 믹스 내보내기 |
-| `GET` | `/api/jobs/{job_id}/export/stems` | 선택 stem 믹스 또는 개별 stem ZIP 내보내기 |
-| `DELETE` | `/api/jobs/{job_id}` | 작업 결과와 업로드 원본 삭제 |
+| 메서드   | 경로                                     | 용도                                                     |
+| -------- | ---------------------------------------- | -------------------------------------------------------- |
+| `GET`    | `/api/health`                            | 서버 상태 확인                                           |
+| `POST`   | `/api/jobs`                              | multipart `file`, 선택적 `quality`·`engine`·`music_analysis`·`midi`로 작업 생성 |
+| `GET`    | `/api/jobs`                              | 저장된 작업 목록 조회                                    |
+| `GET`    | `/api/jobs/{job_id}`                     | 진행 상태·경고 조회                                      |
+| `GET`    | `/api/jobs/{job_id}/analysis`            | 완료된 분석 데이터 조회                                  |
+| `GET`    | `/api/jobs/{job_id}/assets/{asset_path}` | stem 또는 MIDI 에셋 내려받기                             |
+| `GET`    | `/api/jobs/{job_id}/export/mix`          | 전체 스템 믹스 내보내기. `format=wav\|flac\|m4a`                                  |
+| `GET`    | `/api/jobs/{job_id}/export/stems`        | 반복 `stem` 파라미터, `mode=mix\|single\|zip`, `format=wav\|flac\|m4a`. ZIP에서 스템을 생략하면 전체 내보내기               |
+| `GET` | `/api/jobs/{job_id}/export/instrumental` | 보컬을 제외한 5개 스템 믹스. 기본 형식은 WAV |
+| `DELETE` | `/api/jobs/{job_id}`                     | 작업 결과와 업로드 원본 삭제                             |
 
 ## 배포
 
@@ -176,14 +232,17 @@ MUSIC_FAST_UPLOAD=0 uvicorn app.main:app --reload --port 8000
 VITE_API_BASE=https://your-backend-domain.onrender.com
 ```
 
-Render 설정은 결과 보존을 위해 `/app/storage`에 persistent disk를 마운트합니다. 실제 운영 전에는 파일 크기 제한, 인증, 사용자별 격리, 작업 큐/워커 확장 및 보존 정책을 추가하는 것을 권장합니다.
+기본 Render 설정은 BPM·키·코드 분석을 제공하고 Demucs는 비활성화합니다. 업로드 한도는 40MB·5분이며, 실행 중 및 대기 중인 작업을 합해 최대 2개를 받습니다. 분리가 필요한 자체 Docker 환경에서는 `--build-arg INSTALL_AUDIO_MODELS=1`로 이미지를 빌드하고 `MUSIC_ENABLE_DEMUCS=1`로 실행하세요. 모델 캐시와 `/app/storage`의 영구 디스크를 지정하고, 해당 환경에서 처리 시간과 메모리 사용량을 측정하세요.
+
+API는 단일 Uvicorn 프로세스에서 분석 작업을 하나씩 처리합니다. 기다리는 작업은 삭제로 취소할 수 있고, 실행 중인 작업을 삭제하면 409를 반환합니다. 서버 재시작으로 작업이 중단되면 작업 화면에 표시됩니다.
 
 ## 프로젝트 구조
 
 ```text
 backend/
 ├── app/main.py             # FastAPI API, 업로드, 작업 큐, 에셋/내보내기 API
-├── app/processor.py        # 변환·분리·분석·MIDI·압축 파이프라인
+├── app/processor.py        # 변환·분리·분석·MIDI 파이프라인
+├── app/exports.py          # 믹스·개별 스템·ZIP 내보내기
 ├── requirements.txt        # 필수 Python 의존성
 └── requirements-optional.txt
 frontend/
@@ -223,7 +282,7 @@ Local Music Analysis MVP is a local-first, Moises Studio–style music workspace
 - Per-stem mute, solo, volume, pan, playback controls, metronome, and local library metadata
 - MIDI extraction with Basic Pitch, or fast placeholder MIDI by default
 - Mix and individually aligned stem ZIP exports
-- Graceful fallbacks and in-product warnings when optional processing tools are unavailable
+- Explicit separation failures while tempo, key, and chord analysis can still finish
 
 ### Run locally
 
@@ -250,11 +309,11 @@ npm install
 npm run dev
 ```
 
-Open [http://localhost:5173](http://localhost:5173). To enable full Basic Pitch inference, launch the backend with `MUSIC_FAST_UPLOAD=0`.
+Open [http://localhost:8282](http://localhost:8282). To enable full Basic Pitch inference, launch the backend with `MUSIC_FAST_UPLOAD=0`.
 
 ### Important notes
 
-Optional tools are intentionally non-fatal. Without them, jobs still finish using fallback assets/data and report warnings; install `ffmpeg`, Demucs, librosa, and Basic Pitch for production-quality processing. Separation, chord/key detection, and automatic MIDI are estimates and should be reviewed by ear before critical or commercial use.
+Install FFmpeg and the optional Python requirements to enable Demucs, librosa, and Basic Pitch. Successful separation stores 24-bit PCM WAV and supports instrumental, mix, and individual or ZIP stem downloads in WAV, FLAC, and M4A. A failed separation leaves the song analysis available and reports the cause in the UI.
 
 See the Korean documentation above for output layout, environment variables, API routes, deployment guidance, data handling, and operational recommendations.
 

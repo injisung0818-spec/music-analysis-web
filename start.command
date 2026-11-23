@@ -1,11 +1,12 @@
 #!/bin/zsh
 set -e
+export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
 
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BACKEND_DIR="$ROOT_DIR/backend"
 FRONTEND_DIR="$ROOT_DIR/frontend"
 BACKEND_PORT=8000
-FRONTEND_PORT=5173
+FRONTEND_PORT=8282
 BACKEND_LOG="$BACKEND_DIR/backend.log"
 FRONTEND_LOG="$FRONTEND_DIR/frontend.log"
 BACKEND_VENV="$BACKEND_DIR/.venv311"
@@ -35,54 +36,135 @@ backend_is_current_app() {
     && curl -fsS "http://127.0.0.1:$BACKEND_PORT/api/jobs" >/dev/null 2>&1
 }
 
-stop_port_listeners() {
-  local port="$1"
-  local pids
-  pids=("${(@f)$(lsof -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)}")
-  for pid in "${pids[@]}"; do
-    if [ -n "$pid" ]; then
-      kill "$pid" >/dev/null 2>&1 || true
-    fi
-  done
-  sleep 1
+confirm() {
+  local answer
+  [[ -t 0 ]] || return 1
+  read "answer?$1 [y/N] " || return 1
+  [[ "$answer" == [yY] || "$answer" == [yY][eE][sS] ]]
+}
+
+demucs_is_ready() {
+  "$BACKEND_VENV/bin/python" -m demucs --help >/dev/null 2>&1
+}
+
+check_model() {
+  HF_HUB_OFFLINE=1 "$BACKEND_VENV/bin/python" - <<'PY_CHECK'
+import os
+from pathlib import Path
+
+import torch
+
+repo = os.getenv("MUSIC_DEMUCS_REPO")
+if repo:
+    from demucs.pretrained import get_model
+    model = get_model("htdemucs_6s", Path(repo).expanduser())
+else:
+    try:
+        from demucs.hf import get_hf_model
+        model = get_hf_model("htdemucs_6s")
+    except (ImportError, OSError, ValueError):
+        checkpoint = Path(torch.hub.get_dir()) / "checkpoints" / "5c90dfd2-34c22ccb.th"
+        if not checkpoint.is_file():
+            raise
+        from demucs.pretrained import get_model
+        model = get_model("htdemucs_6s")
+
+assert set(model.sources) == {"vocals", "drums", "bass", "guitar", "piano", "other"}
+PY_CHECK
 }
 
 echo "Local Music Analysis MVP"
 echo "Project: $ROOT_DIR"
 echo ""
 
-if ! command -v "$PYTHON_COMMAND" >/dev/null 2>&1; then
-  PYTHON_COMMAND="python3"
-  BACKEND_VENV="$BACKEND_DIR/.venv"
+if port_is_open "$BACKEND_PORT" && ! backend_is_current_app; then
+  echo "Port $BACKEND_PORT is already in use. Stop that service before launching."
+  exit 1
+fi
+
+if [ ! -x "$BACKEND_VENV/bin/python" ] && ! command -v "$PYTHON_COMMAND" >/dev/null 2>&1; then
+  echo "Install Python 3.11 first (brew install python@3.11)."
+  exit 1
 fi
 
 if [ ! -d "$BACKEND_VENV" ]; then
-  echo "Creating backend virtualenv..."
+  echo "Creating backend Python 3.11 virtualenv..."
   "$PYTHON_COMMAND" -m venv "$BACKEND_VENV"
 fi
 
-if ! "$BACKEND_VENV/bin/python" -c "import fastapi, uvicorn" >/dev/null 2>&1; then
-  echo "Installing backend core dependencies..."
-  "$BACKEND_VENV/bin/pip" install -r "$BACKEND_DIR/requirements.txt"
+if ! "$BACKEND_VENV/bin/python" -c "import fastapi, uvicorn, python_multipart, soundfile" >/dev/null 2>&1; then
+  if ! confirm "Install the required backend packages in $BACKEND_VENV?"; then
+    echo "The server needs the packages in backend/requirements.txt."
+    exit 1
+  fi
+  "$BACKEND_VENV/bin/python" -m pip install -r "$BACKEND_DIR/requirements.txt"
 fi
 
+if ! command -v ffmpeg >/dev/null 2>&1; then
+  if command -v brew >/dev/null 2>&1 && confirm "Install ffmpeg with Homebrew?"; then
+    brew install ffmpeg
+  else
+    echo "ffmpeg is missing. Install it for MP3 upload and mix/format exports (brew install ffmpeg)."
+  fi
+fi
+
+case "${MUSIC_ENABLE_DEMUCS:-1}" in
+  0|false|no|off) echo "Demucs is disabled in this environment." ;;
+  *)
+    if ! demucs_is_ready; then
+      echo "Demucs/PyTorch is missing or cannot run in $BACKEND_VENV."
+      if confirm "Install the optional Demucs, analysis, and MIDI packages?"; then
+        "$BACKEND_VENV/bin/python" -m pip install -r "$BACKEND_DIR/requirements-optional.txt" || true
+      fi
+    fi
+    if demucs_is_ready; then
+      "$BACKEND_VENV/bin/python" -c 'import platform, torch; print(f"Demucs uses PyTorch {torch.__version__} on {platform.machine()}.")'
+      if check_model >/dev/null 2>&1; then
+        echo "The htdemucs_6s model is ready."
+      elif [ -n "${MUSIC_DEMUCS_REPO:-}" ]; then
+        echo "Cannot load htdemucs_6s from MUSIC_DEMUCS_REPO. Check the local model files."
+      elif confirm "Download and validate the htdemucs_6s model now?"; then
+        "$BACKEND_VENV/bin/python" -c 'from demucs.pretrained import get_model; print(get_model("htdemucs_6s").sources)' \
+          || echo "Model preparation failed. Check the network and the error above."
+      else
+        echo "The model will be requested on the first separation job."
+      fi
+    else
+      echo "PyTorch separation is unavailable. Run backend/.venv311/bin/python -m demucs --help to see details."
+    fi
+    ;;
+esac
+
+MLX_PYTHON="${MUSIC_MLX_PYTHON:-$BACKEND_DIR/.venv-mlx/bin/python}"
+if [ -z "${MUSIC_MLX_PYTHON:-}" ] && [ ! -x "$MLX_PYTHON" ]; then
+  MLX_PYTHON="$BACKEND_VENV/bin/python"
+fi
+if "$MLX_PYTHON" -c 'from importlib.metadata import version; assert version("demucs-mlx") == "1.6.1"' >/dev/null 2>&1; then
+  echo "Fast (MLX) is available in $MLX_PYTHON."
+elif [[ "$(uname -m)" == "arm64" ]]; then
+  echo "Fast (MLX) is optional. See the Apple Silicon instructions in README.md to enable it."
+fi
+
+"$BACKEND_VENV/bin/python" -c 'from importlib.util import find_spec; print("Optional packages: " + ", ".join(f"{name}={bool(find_spec(name))}" for name in ("librosa", "basic_pitch")))'
+
+if ! command -v npm >/dev/null 2>&1; then
+  echo "Install Node.js with npm to run the frontend."
+  exit 1
+fi
 if [ ! -d "$FRONTEND_DIR/node_modules" ]; then
-  echo "Installing frontend dependencies..."
-  cd "$FRONTEND_DIR"
-  npm install
-  cd "$ROOT_DIR"
+  if ! confirm "Install frontend dependencies from package-lock.json?"; then
+    exit 1
+  fi
+  npm --prefix "$FRONTEND_DIR" ci
 fi
 
 STARTED_PIDS=()
-
-if port_is_open "$BACKEND_PORT"; then
-  if backend_is_current_app; then
-    echo "Backend already running on http://127.0.0.1:$BACKEND_PORT"
-  else
-    echo "Stopping stale server on http://127.0.0.1:$BACKEND_PORT"
-    stop_port_listeners "$BACKEND_PORT"
-  fi
-fi
+cleanup() {
+  for pid in "${STARTED_PIDS[@]}"; do
+    kill "$pid" >/dev/null 2>&1 || true
+  done
+}
+trap cleanup INT TERM EXIT
 
 if ! port_is_open "$BACKEND_PORT"; then
   echo "Starting backend on http://127.0.0.1:$BACKEND_PORT"
@@ -99,7 +181,7 @@ if port_is_open "$FRONTEND_PORT"; then
 else
   echo "Starting frontend on http://localhost:$FRONTEND_PORT"
   cd "$FRONTEND_DIR"
-  npm run dev > "$FRONTEND_LOG" 2>&1 &
+  npm run dev -- --strictPort > "$FRONTEND_LOG" 2>&1 &
   STARTED_PIDS+=($!)
   cd "$ROOT_DIR"
 fi
@@ -119,13 +201,6 @@ fi
 echo ""
 echo "Keep this window open while using the app."
 echo "Press Ctrl+C here to stop servers started by this launcher."
-
-cleanup() {
-  for pid in "${STARTED_PIDS[@]}"; do
-    kill "$pid" >/dev/null 2>&1 || true
-  done
-}
-trap cleanup INT TERM EXIT
 
 if [ ${#STARTED_PIDS[@]} -gt 0 ]; then
   wait

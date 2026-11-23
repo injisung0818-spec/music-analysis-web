@@ -1,17 +1,24 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
-import math
 import os
 import shutil
 import struct
-import subprocess
+import re
+import signal
 import sys
-import wave
+from collections import deque
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Literal, TypeVar
+
+import soundfile
+
+from .separation import Engine, SeparationPlan
 
 from pydantic import BaseModel
 
@@ -30,7 +37,12 @@ MAJOR_PROFILE = [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.2
 MINOR_PROFILE = [6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17]
 ANALYSIS_SAMPLE_RATE = 22050
 CHROMA_HOP_LENGTH = 2048
-DEFAULT_STEM_BITRATE = "80k"
+SeparationQuality = Literal["standard", "high"]
+SeparationStatus = Literal["pending", "running", "succeeded", "failed", "unverified"]
+QUALITY_OPTIONS = {"standard": (1, "0.25"), "high": (3, "0.50")}
+MAX_DURATION = int(os.getenv("MUSIC_MAX_DURATION_SECONDS", "1200"))
+DEMUCS_TIMEOUT = int(os.getenv("MUSIC_DEMUCS_TIMEOUT_SECONDS", "3600"))
+T = TypeVar("T")
 
 
 def now_iso() -> str:
@@ -56,11 +68,26 @@ class JobState(BaseModel):
     job_dir: str
     warnings: list[str] = []
     error: str | None = None
+    separation_quality: SeparationQuality = "standard"
+    separation_status: SeparationStatus = "unverified"
+    separation_error: str | None = None
+    separation_engine: Engine = "torch"
+    actual_separation_engine: Engine | None = None
+    separation_cache_hit: bool = False
+    audio_digest: str | None = None
+    separation_cache_key: str | None = None
+    music_analysis: bool = True
+    midi: bool = True
 
 
 class MusicProcessor:
-    def __init__(self, update_job: Callable[[JobState], Awaitable[None]]) -> None:
+    def __init__(
+        self,
+        update_job: Callable[[JobState], Awaitable[None]],
+        link_cached_stems: Callable[[str, Path], Awaitable[bool]] | None = None,
+    ) -> None:
         self.update_job = update_job
+        self.link_cached_stems = link_cached_stems
 
     async def process(self, state: JobState) -> None:
         job_dir = Path(state.job_dir)
@@ -71,27 +98,39 @@ class MusicProcessor:
             stems_dir = job_dir / "stems"
             midi_dir = job_dir / "midi"
             stems_dir.mkdir(exist_ok=True)
-            midi_dir.mkdir(exist_ok=True)
 
-            converted = await self._convert_to_wav(source, audio_wav, state)
-            remove_upload_source(source)
-            await self._set(state, "running", 0.16, "스템 분리 중")
+            converted = await self._prepare_audio(source, audio_wav)
+            if converted != source:
+                remove_upload_source(source)
 
-            stem_paths = await self._separate_stems(converted, stems_dir, state)
-            await self._set(state, "running", 0.55, "템포, 키, 코드 분석 중")
+            state.separation_status = "running"
+            await self._set(state, "running", 0.16, "Demucs 및 htdemucs_6s 모델 준비 중")
+            stem_paths: dict[str, Path] = {}
+            stem_audio = None
+            try:
+                stem_paths, stem_audio = await self._separate_stems(converted, stems_dir, state)
+            except (RuntimeError, OSError) as exc:
+                state.separation_status = "failed"
+                state.separation_error = str(exc)
+                shutil.rmtree(stems_dir, ignore_errors=True)
+                if not state.music_analysis:
+                    raise
+            else:
+                state.separation_status = "succeeded"
+            message = "템포, 키, 코드 분석 중" if state.music_analysis else "스템 파형 생성 중"
+            await self._set(state, "running", 0.55, message)
 
-            analysis = await asyncio.to_thread(self._analyze_audio, converted, stem_paths, state)
-            await self._set(state, "running", 0.76, "MIDI 추출 중")
-
-            midi_paths = await self._extract_midi(stem_paths, midi_dir, state)
-            await self._set(state, "running", 0.86, "오디오 압축 저장 중")
-
-            asset_stem_paths = await self._compress_stems(stem_paths, state)
+            analysis = await finish_thread_on_cancel(self._analyze_audio, converted, stem_paths, state)
+            midi_paths = {}
+            if stem_paths and state.midi:
+                midi_dir.mkdir(exist_ok=True)
+                await self._set(state, "running", 0.76, "MIDI 추출 중")
+                midi_paths = await self._extract_midi(stem_paths, midi_dir, state)
             await self._set(state, "running", 0.92, "결과 저장 중")
 
             stem_assets = []
             for stem in STEMS:
-                stem_path = asset_stem_paths.get(stem)
+                stem_path = stem_paths.get(stem)
                 midi_path = midi_paths.get(stem)
                 stem_assets.append(
                     {
@@ -113,15 +152,39 @@ class MusicProcessor:
                 "beats": analysis["beats"],
                 "chords": analysis["chords"],
                 "stems": stem_assets,
+                "stem_audio": stem_audio,
+                "separation_quality": state.separation_quality,
+                "separation_engine": state.separation_engine,
+                "actual_separation_engine": state.actual_separation_engine,
+                "separation_cache_hit": state.separation_cache_hit,
+                "music_analysis": state.music_analysis,
+                "midi_requested": state.midi,
+                "separation_status": state.separation_status,
+                "separation_error": state.separation_error,
                 "warnings": state.warnings,
                 "generated_at": now_iso(),
             }
-            (job_dir / "analysis.json").write_text(json.dumps(result, separators=(",", ":")), encoding="utf-8")
-            cleanup_intermediates(source, converted, stems_dir)
-            await self._set(state, "done", 1.0, "분석 완료")
+            audio_wav.unlink(missing_ok=True)
+            remove_upload_source(source)
+            temporary = job_dir / "analysis.json.tmp"
+            temporary.write_text(json.dumps(result, separators=(",", ":")), encoding="utf-8")
+            temporary.replace(job_dir / "analysis.json")
+            if stem_paths:
+                message = "6개 스템 분리 완료"
+            elif state.music_analysis:
+                message = "음악 분석 완료 · 스템 분리 실패"
+            else:
+                message = "스템 분리 실패"
+            await self._set(state, "done", 1.0, message)
+        except asyncio.CancelledError:
+            cleanup_failed_artifacts(job_dir, source)
+            raise
         except Exception as exc:
             cleanup_failed_artifacts(job_dir, source)
             state.error = str(exc)
+            if state.separation_status in {"pending", "running", "succeeded"}:
+                state.separation_status = "failed"
+                state.separation_error = state.error
             await self._set(state, "error", state.progress, "처리 실패")
 
     async def _set(self, state: JobState, status: str, progress: float, message: str) -> None:
@@ -130,74 +193,175 @@ class MusicProcessor:
         state.message = message
         await self.update_job(state)
 
-    async def _convert_to_wav(self, source: Path, target: Path, state: JobState) -> Path:
+    async def _prepare_audio(self, source: Path, target: Path) -> Path:
         if source.suffix.lower() == ".wav":
-            shutil.copyfile(source, target)
-            state.warnings.append("WAV 파일이라 ffmpeg 재변환을 건너뛰고 바로 분석했습니다.")
-            return target
-
-        ffmpeg = find_executable("ffmpeg")
-        if ffmpeg:
+            target = source
+        else:
+            ffmpeg = find_executable("ffmpeg")
+            if not ffmpeg:
+                raise RuntimeError("MP3 변환에 ffmpeg가 필요합니다.")
             cmd = [
-                ffmpeg,
-                "-y",
-                "-nostdin",
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-i",
-                str(source),
-                "-ac",
-                "2",
-                "-ar",
-                "44100",
-                str(target),
+                ffmpeg, "-y", "-nostdin", "-hide_banner", "-loglevel", "error",
+                "-i", str(source), "-map", "0:a:0", "-t", str(MAX_DURATION + 1),
+                "-c:a", "pcm_s24le", str(target),
             ]
-            await asyncio.to_thread(self._run_command, cmd, "ffmpeg 변환 실패")
-            return target
-
-        if source.suffix.lower() == ".wav":
-            shutil.copyfile(source, target)
-            state.warnings.append("ffmpeg가 설치되어 있지 않아 WAV 파일을 변환 없이 복사했습니다.")
-            return target
-
-        state.warnings.append("ffmpeg가 설치되어 있지 않아 MP3 변환을 건너뛰고 테스트용 무음 오디오를 생성했습니다.")
-        await asyncio.to_thread(write_silent_wav, target, 30.0)
+            await self._run_command(cmd, "MP3 변환 실패", timeout=180)
+        try:
+            info = soundfile.info(target)
+        except (RuntimeError, OSError) as exc:
+            raise RuntimeError("유효한 WAV 오디오를 읽을 수 없습니다.") from exc
+        if info.frames <= 0 or info.samplerate <= 0:
+            raise RuntimeError("재생할 오디오 샘플이 없습니다.")
+        if info.duration > MAX_DURATION:
+            raise RuntimeError(f"지원하는 최대 오디오 길이는 {MAX_DURATION}초입니다.")
         return target
 
-    async def _separate_stems(self, audio_wav: Path, stems_dir: Path, state: JobState) -> dict[str, Path]:
-        demucs = find_executable("demucs")
-        if demucs:
-            out_dir = stems_dir / "_demucs"
-            cmd = [demucs, "-n", "htdemucs_6s", "--out", str(out_dir), str(audio_wav)]
-            try:
-                await asyncio.to_thread(self._run_command, cmd, "Demucs 스템 분리 실패")
-                model_dir = out_dir / "htdemucs_6s" / audio_wav.stem
-                paths = {}
-                for stem in STEMS:
-                    src = model_dir / f"{stem}.wav"
-                    dst = stems_dir / f"{stem}.wav"
-                    if src.exists():
-                        shutil.copyfile(src, dst)
-                        paths[stem] = dst
-                if len(paths) == len(STEMS):
-                    shutil.rmtree(out_dir, ignore_errors=True)
-                    return paths
-                state.warnings.append("Demucs가 완료됐지만 6개 stem이 모두 생성되지 않아 fallback stems를 생성했습니다.")
-            except Exception as exc:
-                state.warnings.append(f"Demucs 실행에 실패해 fallback stems를 생성했습니다. 상세: {exc}")
-            shutil.rmtree(out_dir, ignore_errors=True)
+    async def _separate_stems(
+        self, audio_wav: Path, stems_dir: Path, state: JobState
+    ) -> tuple[dict[str, Path], dict[str, int]]:
+        if not env_flag("MUSIC_ENABLE_DEMUCS", True):
+            raise RuntimeError("이 서버에서는 Demucs 스템 분리가 비활성화되어 있습니다.")
+        requested = state.separation_engine
+        input_digest = state.audio_digest if self.link_cached_stems else None
+        if input_digest and audio_wav != Path(state.source_path):
+            input_digest = await asyncio.to_thread(file_digest, audio_wav)
+        try:
+            plan = SeparationPlan.build(requested)
+        except RuntimeError as exc:
+            if requested == "torch":
+                raise
+            reason = str(exc)
         else:
-            state.warnings.append("demucs 명령을 찾을 수 없어 실제 스템 분리 대신 fallback stems를 생성했습니다.")
+            try:
+                return await self._run_separation(plan, audio_wav, stems_dir, state, input_digest)
+            except (RuntimeError, OSError) as exc:
+                if not plan.accelerated:
+                    raise
+                reason = f"{plan.device} · {exc}"
 
-        paths = {}
-        other_path = stems_dir / "other.wav"
-        shutil.copyfile(audio_wav, other_path)
-        paths["other"] = other_path
-        state.warnings.append("저장 용량을 줄이기 위해 fallback 무음 stem 파일 생성을 생략했습니다.")
-        return paths
+        state.warnings.append(f"가속 분리 실패. 동일한 품질 설정으로 PyTorch CPU 재시도 · {reason}")
+        await self._set(state, "running", 0.16, "PyTorch CPU에서 스템 분리 재시도 중")
+        try:
+            plan = SeparationPlan.build("torch", cpu_retry=True)
+            return await self._run_separation(plan, audio_wav, stems_dir, state, input_digest)
+        except (RuntimeError, OSError) as exc:
+            raise RuntimeError(f"가속 분리 실패 · {reason} / PyTorch CPU 재시도 실패 · {exc}") from exc
+
+    async def _run_separation(
+        self, plan: SeparationPlan, audio_wav: Path, stems_dir: Path, state: JobState, input_digest: str | None
+    ) -> tuple[dict[str, Path], dict[str, int]]:
+        if plan.engine != "mlx" and not demucs_installed():
+            raise RuntimeError("이 서버의 Python 환경에 Demucs가 없습니다. start.command 또는 requirements-optional.txt로 설치하세요.")
+
+        out_dir = stems_dir / "_demucs"
+        shutil.rmtree(out_dir, ignore_errors=True)
+        shifts, overlap = QUALITY_OPTIONS[state.separation_quality]
+
+        async def cache_key() -> str | None:
+            if not input_digest:
+                return None
+            return await asyncio.to_thread(plan.cache_key, input_digest, shifts, overlap)
+
+        key = await cache_key()
+        if key and self.link_cached_stems and await self.link_cached_stems(key, out_dir):
+            cached_paths = {name: out_dir / f"{name}.wav" for name in STEMS}
+            try:
+                metadata = await finish_thread_on_cancel(validate_stem_wavs, cached_paths, audio_wav)
+            except (RuntimeError, OSError):
+                shutil.rmtree(out_dir, ignore_errors=True)
+            else:
+                published = publish_stem_wavs(cached_paths, out_dir, stems_dir)
+                state.separation_cache_hit = True
+                state.separation_cache_key = key
+                state.actual_separation_engine = plan.engine
+                await self._set(state, "running", 0.52, "저장된 6개 스템 재사용")
+                return published, metadata
+
+        cmd, model_dir, env = plan.command(audio_wav, out_dir, shifts, overlap)
+        started = False
+        completed_passes = 0
+        previous_percent = 0
+
+        async def report(line: str) -> None:
+            nonlocal started, completed_passes, previous_percent
+            if line.startswith("Separating track"):
+                started = True
+                await self._set(state, "running", 0.18, "htdemucs_6s 스템 분리 중")
+            elif line == "Writing stems":
+                await self._set(state, "running", 0.51, "스템 WAV 저장 중")
+            elif started and (match := re.search(r"(\d+)%\|", line)):
+                percent = int(match[1])
+                if percent < previous_percent:
+                    completed_passes += 1
+                previous_percent = percent
+                fraction = (completed_passes + percent / 100) / shifts
+                progress = min(0.51, 0.18 + 0.33 * fraction)
+                if progress - state.progress >= 0.02:
+                    await self._set(state, "running", progress, "htdemucs_6s 스템 분리 중")
+
+        try:
+            await self._run_command(cmd, "Demucs 실행 실패", DEMUCS_TIMEOUT, report, env=env)
+        except (RuntimeError, OSError) as exc:
+            stage = "스템 처리" if started else "Demucs 시작 또는 htdemucs_6s 모델 로드"
+            raise RuntimeError(f"{stage} 실패 · {exc}") from exc
+
+        await self._set(state, "running", 0.52, "6개 스템 WAV 검증 중")
+        paths = {name: model_dir / f"{name}.wav" for name in STEMS}
+        metadata = await finish_thread_on_cancel(validate_stem_wavs, paths, audio_wav)
+        state.actual_separation_engine = plan.engine
+        state.separation_cache_key = await cache_key()
+        return publish_stem_wavs(paths, out_dir, stems_dir), metadata
+
+    async def _run_command(
+        self,
+        cmd: list[str],
+        error_message: str,
+        timeout: int,
+        report: Callable[[str], Awaitable[None]] | None = None,
+        *,
+        env: dict[str, str] | None = None,
+    ) -> None:
+        process = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+            start_new_session=True, env=env,
+        )
+        assert process.stdout is not None
+        details: deque[str] = deque(maxlen=6)
+        pending = ""
+        try:
+            async with asyncio.timeout(timeout):
+                while chunk := await process.stdout.read(4096):
+                    lines = re.split(r"[\r\n]", pending + chunk.decode("utf-8", errors="replace"))
+                    pending = lines.pop()[-4096:]
+                    for line in lines:
+                        if report:
+                            await report(line)
+                        if line.strip() and not re.search(r"\d+%\|", line):
+                            details.append(line.strip())
+                if pending.strip():
+                    details.append(pending.strip())
+                await process.wait()
+        except TimeoutError as exc:
+            raise RuntimeError(f"{error_message} · {timeout}초 실행 시간 제한을 초과했습니다.") from exc
+        finally:
+            if process.returncode is None:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                await process.wait()
+
+        if process.returncode:
+            detail = "\n".join(details)[-1200:] or f"종료 코드 {process.returncode}"
+            raise RuntimeError(f"{error_message} · {detail}")
 
     def _analyze_audio(self, audio_wav: Path, stem_paths: dict[str, Path], state: JobState) -> dict:
+        waveforms = {stem: waveform_peaks(path) for stem, path in stem_paths.items()}
+        if not state.music_analysis:
+            return {
+                "duration": round(soundfile.info(audio_wav).duration, 3),
+                "bpm": 0, "key": "", "mode": "", "beats": [], "chords": [], "waveforms": waveforms,
+            }
         try:
             import librosa
             import numpy as np
@@ -220,11 +384,6 @@ class MusicProcessor:
             chroma = normalize_chroma(chroma)
             key, mode = estimate_key(chroma)
             chords = estimate_chords(chroma, sr, librosa, duration, CHROMA_HOP_LENGTH, beat_times)
-            mix_waveform = waveform_peaks(audio_wav)
-            waveforms = {
-                stem: stem_waveform(stem, path, mix_waveform) if (path := stem_paths.get(stem)) else shaped_mix_waveform(stem, mix_waveform)
-                for stem in STEMS
-            }
             return {
                 "duration": round(duration, 3),
                 "bpm": round(tempo_value, 2),
@@ -236,16 +395,11 @@ class MusicProcessor:
             }
         except Exception as exc:
             state.warnings.append(f"librosa가 설치되어 있지 않거나 분석에 실패해 임시 BPM/key/chord 분석 결과를 생성했습니다. 상세: {exc}")
-            duration = get_wav_duration(audio_wav) or 30.0
+            duration = soundfile.info(audio_wav).duration
             bpm = 120.0
             beat_step = 60.0 / bpm
             beats = [{"time": round(i * beat_step, 3), "index": i + 1} for i in range(int(duration / beat_step))]
             chords = mock_chords(duration)
-            mix_waveform = waveform_peaks(audio_wav)
-            waveforms = {
-                stem: stem_waveform(stem, path, mix_waveform) if (path := stem_paths.get(stem)) else shaped_mix_waveform(stem, mix_waveform)
-                for stem in STEMS
-            }
             return {
                 "duration": round(duration, 3),
                 "bpm": bpm,
@@ -267,7 +421,7 @@ class MusicProcessor:
 
             midi_paths = {}
             for stem, path in stem_paths.items():
-                await asyncio.to_thread(
+                await finish_thread_on_cancel(
                     predict_and_save,
                     [str(path)],
                     str(midi_dir),
@@ -289,62 +443,33 @@ class MusicProcessor:
             state.warnings.append(f"basic-pitch가 설치되어 있지 않거나 MIDI 추출에 실패해 placeholder MIDI 파일을 생성했습니다. 상세: {exc}")
             return write_placeholder_midis(midi_dir)
 
-    async def _compress_stems(self, stem_paths: dict[str, Path], state: JobState) -> dict[str, Path]:
-        ffmpeg = find_executable("ffmpeg")
-        if not ffmpeg:
-            state.warnings.append("ffmpeg가 없어 stem WAV를 압축하지 않고 저장했습니다.")
-            return stem_paths
 
-        compressed: dict[str, Path] = {}
-        for stem, path in stem_paths.items():
-            target = path.with_suffix(".m4a")
-            cmd = [
-                ffmpeg,
-                "-y",
-                "-nostdin",
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-i",
-                str(path),
-                "-vn",
-                "-c:a",
-                "aac",
-                "-b:a",
-                os.getenv("MUSIC_STEM_BITRATE", DEFAULT_STEM_BITRATE),
-                "-movflags",
-                "+faststart",
-                str(target),
-            ]
-            try:
-                await asyncio.to_thread(self._run_command, cmd, "stem 오디오 압축 실패")
-                if target.exists() and target.stat().st_size > 0:
-                    path.unlink(missing_ok=True)
-                    compressed[stem] = target
-                else:
-                    compressed[stem] = path
-            except Exception as exc:
-                state.warnings.append(f"{stem} stem 압축에 실패해 WAV로 저장했습니다. 상세: {exc}")
-                target.unlink(missing_ok=True)
-                compressed[stem] = path
-        return compressed
-
-    def _run_command(self, cmd: list[str], error_message: str) -> None:
-        completed = subprocess.run(cmd, capture_output=True, text=True, check=False)
-        if completed.returncode != 0:
-            stderr = completed.stderr.strip().splitlines()
-            detail = stderr[-1] if stderr else "알 수 없는 오류"
-            raise RuntimeError(f"{error_message}: {detail}")
+def file_digest(path: Path) -> str:
+    with path.open("rb") as handle:
+        return hashlib.file_digest(handle, "sha256").hexdigest()
 
 
-def get_wav_duration(path: Path) -> float | None:
+def publish_stem_wavs(paths: dict[str, Path], staging: Path, destination: Path) -> dict[str, Path]:
+    published = {name: path.replace(destination / path.name) for name, path in paths.items()}
+    shutil.rmtree(staging, ignore_errors=True)
+    return published
+
+
+async def finish_thread_on_cancel(function: Callable[..., T], *args) -> T:
+    # Threads cannot be cancelled safely while reading or writing job files.
+    task = asyncio.create_task(asyncio.to_thread(function, *args))
     try:
-        with wave.open(str(path), "rb") as handle:
-            frames = handle.getnframes()
-            rate = handle.getframerate()
-            return frames / float(rate)
-    except Exception:
-        return None
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        with suppress(Exception):
+            await task
+        raise
+
+
+def demucs_installed() -> bool:
+    from importlib.util import find_spec
+
+    return find_spec("demucs") is not None
 
 
 def find_executable(name: str) -> str | None:
@@ -352,71 +477,49 @@ def find_executable(name: str) -> str | None:
     if from_path:
         return from_path
     venv_bin = Path(sys.executable).parent / name
-    if venv_bin.exists():
+    if venv_bin.is_file() and os.access(venv_bin, os.X_OK):
         return str(venv_bin)
     return None
 
 
-def write_silent_wav(path: Path, duration: float, sample_rate: int = 44100) -> None:
-    frames = int(max(0.1, duration) * sample_rate)
-    with wave.open(str(path), "wb") as handle:
-        handle.setnchannels(2)
-        handle.setsampwidth(2)
-        handle.setframerate(sample_rate)
-        silence = b"\x00\x00\x00\x00" * min(sample_rate, frames)
-        remaining = frames
-        while remaining > 0:
-            chunk = min(sample_rate, remaining)
-            handle.writeframes(silence[: chunk * 4])
-            remaining -= chunk
+def validate_stem_wavs(paths: dict[str, Path], source: Path) -> dict[str, int]:
+    source_duration = soundfile.info(source).duration
+    expected = None
+    for name, path in paths.items():
+        if not path.is_file():
+            raise RuntimeError(f"Demucs가 {name}.wav 파일을 생성하지 않았습니다.")
+        try:
+            with soundfile.SoundFile(path) as audio:
+                metadata = (audio.frames, audio.samplerate, audio.channels)
+                valid_format = audio.format in {"WAV", "WAVEX"} and audio.subtype == "PCM_24"
+                if not valid_format or audio.frames <= 0 or audio.channels not in {1, 2}:
+                    raise RuntimeError("비어 있거나 지원하지 않는 PCM WAV입니다.")
+                if abs(audio.frames / audio.samplerate - source_duration) > 0.01:
+                    raise RuntimeError("원본과 재생 길이가 일치하지 않습니다.")
+                audio.seek(audio.frames - 1)
+                if len(audio.buffer_read(1, dtype="int32")) != audio.channels * 4:
+                    raise RuntimeError("마지막 오디오 프레임을 읽을 수 없습니다.")
+        except (RuntimeError, OSError) as exc:
+            raise RuntimeError(f"Demucs 결과 {name}.wav 검증 실패 · {exc}") from exc
+        if expected is not None and metadata != expected:
+            raise RuntimeError(f"{name}.wav의 프레임 수, 샘플레이트 또는 채널이 다른 스템과 다릅니다.")
+        expected = metadata
+    assert expected is not None
+    frames, sample_rate, channels = expected
+    return {"frames": frames, "sample_rate": sample_rate, "channels": channels, "bit_depth": 24}
 
 
 def waveform_peaks(path: Path, points: int = 2400) -> list[float]:
-    try:
-        with wave.open(str(path), "rb") as handle:
-            channels = handle.getnchannels()
-            frames = handle.getnframes()
-            sample_width = handle.getsampwidth()
-            raw = handle.readframes(frames)
-        if sample_width != 2 or frames == 0:
-            return synthetic_waveform(points)
-        samples = struct.unpack("<" + "h" * (len(raw) // 2), raw)
-        mono = []
-        for i in range(0, len(samples), channels):
-            mono.append(sum(abs(samples[i + ch]) for ch in range(channels)) / channels / 32768)
-        bucket = max(1, len(mono) // points)
-        peaks = [max(mono[i : i + bucket] or [0]) for i in range(0, len(mono), bucket)]
-        return [round(float(v), 4) for v in peaks[:points]]
-    except Exception:
-        return synthetic_waveform(points)
+    import numpy as np
 
-
-def synthetic_waveform(points: int) -> list[float]:
-    return [round(0.15 + 0.7 * abs(math.sin(i * 0.19)) * (0.6 + 0.4 * abs(math.sin(i * 0.047))), 4) for i in range(points)]
-
-
-def stem_waveform(stem: str, path: Path, mix_waveform: list[float]) -> list[float]:
-    peaks = waveform_peaks(path)
-    if peaks and max(peaks) > 0.01:
-        return peaks
-    return shaped_mix_waveform(stem, mix_waveform)
-
-
-def shaped_mix_waveform(stem: str, mix_waveform: list[float]) -> list[float]:
-    profiles = {
-        "vocals": (0.72, 0.21, 0.037),
-        "drums": (0.96, 0.55, 0.083),
-        "bass": (0.62, 0.34, 0.021),
-        "guitar": (0.68, 0.28, 0.051),
-        "piano": (0.55, 0.22, 0.033),
-        "other": (0.5, 0.18, 0.047),
-    }
-    gain, movement, speed = profiles.get(stem, (0.6, 0.2, 0.04))
-    shaped = []
-    for index, peak in enumerate(mix_waveform):
-        envelope = gain + movement * abs(math.sin(index * speed))
-        shaped.append(round(max(0.01, min(1.0, peak * envelope)), 4))
-    return shaped
+    with soundfile.SoundFile(path) as audio:
+        bucket_size = (audio.frames + points - 1) // points
+        peaks = []
+        while len(samples := audio.read(bucket_size * 32, dtype="float32", always_2d=True)):
+            envelope = np.abs(samples).mean(axis=1)
+            starts = np.arange(0, len(envelope), bucket_size)
+            peaks.extend(round(float(peak), 4) for peak in np.maximum.reduceat(envelope, starts))
+    return peaks
 
 
 def estimate_key(chroma) -> tuple[str, str]:
@@ -604,12 +707,6 @@ def remove_upload_source(source: Path) -> None:
         source.parent.rmdir()
 
 
-def cleanup_intermediates(source: Path, converted: Path, stems_dir: Path) -> None:
-    converted.unlink(missing_ok=True)
-    remove_upload_source(source)
-    shutil.rmtree(stems_dir / "_demucs", ignore_errors=True)
-
-
 def cleanup_failed_artifacts(job_dir: Path, source: Path) -> None:
     remove_upload_source(source)
     if (job_dir / "analysis.json").exists():
@@ -617,6 +714,7 @@ def cleanup_failed_artifacts(job_dir: Path, source: Path) -> None:
         return
 
     (job_dir / "source.wav").unlink(missing_ok=True)
+    (job_dir / "analysis.json.tmp").unlink(missing_ok=True)
     shutil.rmtree(job_dir / "stems", ignore_errors=True)
     shutil.rmtree(job_dir / "midi", ignore_errors=True)
 

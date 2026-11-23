@@ -1,10 +1,18 @@
-import type { Analysis, JobResponse } from "./types";
+import type { Analysis, AudioFormat, JobResponse, SeparationEngine, SeparationQuality, StemName } from "./types";
 
 export const API_BASE = import.meta.env.VITE_API_BASE ?? "";
 
-export async function uploadAudio(file: File): Promise<JobResponse> {
+export async function uploadAudio(
+  file: File, quality: SeparationQuality, engine: SeparationEngine | "", stemsOnly: boolean
+): Promise<JobResponse> {
   const form = new FormData();
   form.append("file", file);
+  form.append("quality", quality);
+  if (engine) form.append("engine", engine);
+  if (stemsOnly) {
+    form.append("music_analysis", "false");
+    form.append("midi", "false");
+  }
   const response = await fetch(`${API_BASE}/api/jobs`, {
     method: "POST",
     body: form
@@ -63,14 +71,19 @@ export function assetUrl(path: string | null): string | null {
   return path.startsWith("http") ? path : `${API_BASE}${path}`;
 }
 
-export function exportMixUrl(id: string): string {
-  return `${API_BASE}/api/jobs/${id}/export/mix`;
+export function exportMixUrl(id: string, format: AudioFormat): string {
+  return `${API_BASE}/api/jobs/${id}/export/mix?format=${format}`;
 }
 
-export function exportStemsUrl(id: string, stems: string[], mode = "mix"): string {
-  const params = new URLSearchParams();
+export function exportInstrumentalUrl(id: string, format: AudioFormat): string {
+  return `${API_BASE}/api/jobs/${id}/export/instrumental?format=${format}`;
+}
+
+export function exportStemsUrl(
+  id: string, stems: StemName[], mode: "mix" | "zip" | "single", format: AudioFormat
+): string {
+  const params = new URLSearchParams({ mode, format });
   stems.forEach((stem) => params.append("stem", stem));
-  params.set("mode", mode);
   return `${API_BASE}/api/jobs/${id}/export/stems?${params.toString()}`;
 }
 

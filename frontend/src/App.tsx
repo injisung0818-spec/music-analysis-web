@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, MouseEvent as ReactMouseEvent } from "react";
-import { assetUrl, deleteJob, exportMixUrl, exportStemsUrl, fetchAnalysis, fetchJob, fetchJobs, uploadAudio } from "./api";
-import type { Analysis, JobResponse, StemName, TrackState } from "./types";
+import { assetUrl, deleteJob, exportInstrumentalUrl, exportMixUrl, exportStemsUrl, fetchAnalysis, fetchJob, fetchJobs, uploadAudio } from "./api";
+import type { Analysis, AudioFormat, JobResponse, SeparationEngine, SeparationQuality, SeparationStatus, StemName, TrackState } from "./types";
 import iconBass from "./assets/figma-icons/bass.svg";
 import iconDrums from "./assets/figma-icons/drums.svg";
 import iconExport from "./assets/figma-icons/export.svg";
@@ -156,6 +156,11 @@ export default function App() {
   const [openSongMenuId, setOpenSongMenuId] = useState<string | null>(null);
   const [libraryLoaded, setLibraryLoaded] = useState(false);
   const [uploadFileName, setUploadFileName] = useState("");
+  const [separationQuality, setSeparationQuality] = useState<SeparationQuality>("standard");
+  const [separationEngine, setSeparationEngine] = useState<SeparationEngine | "">("");
+  const [stemsOnly, setStemsOnly] = useState(false);
+  const [uploadBusy, setUploadBusy] = useState(false);
+  const [exportFormat, setExportFormat] = useState<AudioFormat>("wav");
   const [exportStemSelection, setExportStemSelection] = useState<StemName[]>([]);
   const [exportSeparateStems, setExportSeparateStems] = useState(false);
   const [exportBusy, setExportBusy] = useState(false);
@@ -168,10 +173,14 @@ export default function App() {
   const [repeatOn, setRepeatOn] = useState(false);
   const [globalVolume, setGlobalVolume] = useState(1);
   const [error, setError] = useState<string | null>(null);
+  const uploadInFlightRef = useRef(false);
+  const activeSongIdRef = useRef<string | null>(null);
   const audioRefs = useRef<Record<string, HTMLAudioElement | null>>({});
   const panGraphRefs = useRef<Record<string, PanGraph>>({});
   const rafRef = useRef<number | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
+  const masterGainRef = useRef<GainNode | null>(null);
+  const lastAudioSyncRef = useRef(0);
   const metronomeBeatRef = useRef(-1);
   const currentTimeRef = useRef(0);
   const controlsScrollRef = useRef<HTMLDivElement | null>(null);
@@ -187,10 +196,19 @@ export default function App() {
   const beat = Math.max(1, Math.floor((currentTime % (beatLength * 4)) / beatLength) + 1);
   const div = Math.max(1, Math.floor((currentTime % beatLength) / (beatLength / 4)) + 1);
   const tick = Math.max(0, Math.floor(((currentTime % (beatLength / 4)) / (beatLength / 4)) * 120));
-  const transportKey = analysis ? `${analysis.key} ${modeLabel(analysis.mode)}` : "Cmin";
+  const analysisSkipped = analysis?.music_analysis === false;
+  const transportKey = analysisSkipped ? "--" : analysis ? `${analysis.key} ${modeLabel(analysis.mode)}` : "Cmin";
+  activeSongIdRef.current = activeSongId;
+  const separationStatus = analysis?.separation_status ?? job?.separation_status;
+  const separationError = analysis?.separation_error ?? job?.separation_error;
   const progress = Math.round((job?.progress ?? 0) * 100);
   const stems = analysis?.stems ?? stemPlaceholders();
-  const exportableStems = useMemo(() => analysis?.stems.filter((stem) => stem.audio_url).map((stem) => stem.name) ?? [], [analysis]);
+  const exportableStems = analysis?.separation_status === "succeeded"
+    ? analysis.stems.filter((stem) => stem.audio_url).map((stem) => stem.name)
+    : [];
+  const canPlayStems = exportableStems.length === 6;
+  const jobId = job?.id;
+  const jobStatus = job?.status;
   const orderedSongs = useMemo(() => sortSongs(songs), [songs]);
   const activeSongTitle = songs.find((song) => song.id === activeSongId)?.title ?? analysis?.original_filename ?? "노래 이름";
   const modalOpen = modalView !== null;
@@ -250,41 +268,49 @@ export default function App() {
   }, [folders, songs, libraryLoaded]);
 
   useEffect(() => {
-    if (!job || job.status === "done" || job.status === "error") return;
-    const pollingSongId = activeSongId;
-    const timer = window.setInterval(async () => {
+    if (!jobId || jobStatus === "done" || jobStatus === "error") return;
+    let stopped = false;
+    let timer: number;
+    async function poll() {
+      if (!jobId) return;
       try {
-        const next = await fetchJob(job.id);
+        const next = await fetchJob(jobId);
+        const result = next.status === "done" ? applyStemPalette(await fetchAnalysis(next.id)) : null;
+        if (stopped) return;
         setJob(next);
-        if (pollingSongId) {
-          setSongs((prev) => prev.map((song) => (song.id === pollingSongId ? { ...song, job: next, error: next.error ?? null } : song)));
-        }
-        if (next.status === "done") {
-          const result = applyStemPalette(await fetchAnalysis(next.id));
-          setAnalysis(result);
-          if (pollingSongId) {
-            setSongs((prev) => prev.map((song) => (song.id === pollingSongId ? { ...song, job: next, analysis: result, error: null } : song)));
-          }
-        }
+        setError(null);
+        if (result) setAnalysis(result);
+        setSongs((prev) => prev.map((song) => (
+          song.id === activeSongId ? { ...song, job: next, analysis: result, error: next.error ?? null } : song
+        )));
+        if (next.status === "done" || next.status === "error") return;
       } catch (pollError) {
-        const message = normalizeErrorMessage(pollError);
-        setError(message);
-        if (pollingSongId) {
-          setSongs((prev) => prev.map((song) => (song.id === pollingSongId ? { ...song, error: message } : song)));
-        }
+        if (stopped) return;
+        setError(normalizeErrorMessage(pollError));
       }
-    }, 650);
-    return () => window.clearInterval(timer);
-  }, [job, activeSongId]);
+      timer = window.setTimeout(poll, 650);
+    }
+    timer = window.setTimeout(poll, 250);
+    return () => {
+      stopped = true;
+      window.clearTimeout(timer);
+    };
+  }, [jobId, jobStatus, activeSongId]);
 
   useEffect(() => {
     if (!isPlaying) {
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
       return;
     }
-    const tickFrame = () => {
+    const tickFrame = (now: number) => {
       const first = firstPlayableAudio();
-      if (first) setCurrentTime(first.currentTime);
+      if (first) {
+        setCurrentTime(first.currentTime);
+        if (now - lastAudioSyncRef.current >= 50) {
+          synchronizeAudioElements(first);
+          lastAudioSyncRef.current = now;
+        }
+      }
       rafRef.current = requestAnimationFrame(tickFrame);
     };
     rafRef.current = requestAnimationFrame(tickFrame);
@@ -295,20 +321,29 @@ export default function App() {
 
   useEffect(() => {
     if (!analysis) return;
+    const context = ensureAudioContext();
+    const masterGain = context ? ensureMasterGain(context) : null;
+    if (masterGain && context) {
+      masterGain.gain.cancelScheduledValues(context.currentTime);
+      masterGain.gain.setTargetAtTime(globalVolume, context.currentTime, 0.015);
+    }
     for (const stem of analysis.stems) {
       const audio = audioRefs.current[stem.name];
       if (!audio) continue;
       const state = tracks[stem.name];
-      audio.volume = state.volume * globalVolume;
+      const graph = ensurePanGraph(stem.name, audio);
+      // WKWebView does not consistently apply HTMLMediaElement.volume after a
+      // MediaElementAudioSourceNode is attached.  Per-track volume stays on the
+      // element, while the master level is applied by a real Web Audio gain.
+      audio.volume = graph ? state.volume : state.volume * globalVolume;
       audio.muted = state.muted || (soloActive && !state.solo);
       audio.loop = repeatOn;
-      const graph = ensurePanGraph(stem.name, audio);
       if (graph) graph.panner.pan.value = state.pan;
     }
   }, [tracks, soloActive, analysis, globalVolume, repeatOn]);
 
   useEffect(() => {
-    if (!isPlaying || !metronomeOn || !analysis) {
+    if (!isPlaying || !metronomeOn || !analysis || analysis.music_analysis === false) {
       metronomeBeatRef.current = -1;
       return;
     }
@@ -345,61 +380,74 @@ export default function App() {
   }, [currentTime, displayDuration, isPlaying, timelineWidth]);
 
   async function handleFile(file: File) {
+    if (uploadInFlightRef.current) return;
+    uploadInFlightRef.current = true;
+    setUploadBusy(true);
     setError(null);
+    setJob(null);
     setAnalysis(null);
     setIsPlaying(false);
+    pauseAll();
     setCurrentTime(0);
     setSongInfoOpen(false);
     setUploadFileName(file.name);
     setModalView("upload");
     const songId = createId();
     setSongs((prev) => sortSongs([...prev, { id: songId, jobId: null, title: file.name, folderId: null, pinned: false, restoring: false, job: null, analysis: null, error: null }]));
+    activeSongIdRef.current = songId;
     setActiveSongId(songId);
     try {
-      const created = await uploadAudio(file);
-      setJob(created);
-      setSongs((prev) => sortSongs(prev.map((song) => (song.id === songId ? { ...song, jobId: created.id, job: created } : song))));
+      const created = await uploadAudio(file, separationQuality, separationEngine, stemsOnly);
+      const existing = songs.find((song) => song.jobId === created.id);
+      const targetId = existing?.id ?? songId;
+      setSongs((prev) => sortSongs(prev
+        .filter((song) => !existing || song.id !== songId)
+        .map((song) => (song.id === targetId ? { ...song, jobId: created.id, job: created } : song))));
+      if (activeSongIdRef.current === songId) {
+        setActiveSongId(targetId);
+        setJob(created);
+      }
     } catch (uploadError) {
       const message = normalizeErrorMessage(uploadError);
-      setError(message);
+      if (activeSongIdRef.current === songId) setError(message);
       setSongs((prev) => prev.map((song) => (song.id === songId ? { ...song, error: message } : song)));
+    } finally {
+      uploadInFlightRef.current = false;
+      setUploadBusy(false);
     }
   }
 
+  function openUploadModal() {
+    setError(null);
+    setUploadFileName("");
+    setModalView("upload");
+  }
+
   function openExportModal() {
-    if (!analysis) {
-      setError("내보낼 노래를 먼저 선택하거나 분석을 완료하세요.");
-      return;
-    }
+    if (!canPlayStems) return;
     setError(null);
     setExportStemSelection(exportableStems);
     setExportSeparateStems(false);
     setModalView("export");
   }
 
-  async function downloadExport(url: string, fallbackName = "export") {
-    const response = await fetch(url);
-    if (!response.ok) {
-      throw new Error(await exportErrorMessage(response));
-    }
-    const blob = await response.blob();
-    const href = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = href;
-    link.download = downloadNameFromHeader(response.headers.get("content-disposition"), fallbackName);
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    URL.revokeObjectURL(href);
-  }
-
-  async function exportWholeSong() {
-    if (!analysis) return;
+  async function downloadExport(url: string, suffix: string, extension: string = exportFormat) {
+    if (exportBusy) return;
     setExportBusy(true);
     setError(null);
     try {
-      await downloadExport(exportMixUrl(analysis.job_id));
-      setModalView(null);
+      const response = await fetch(url);
+      if (!response.ok) throw new Error(await exportErrorMessage(response));
+      const href = URL.createObjectURL(await response.blob());
+      const link = document.createElement("a");
+      link.href = href;
+      link.download = downloadNameFromHeader(
+        response.headers.get("content-disposition"), `${safeFileBase(activeSongTitle)}-${suffix}.${extension}`
+      );
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(href), 1000);
     } catch (exportError) {
       setError(normalizeErrorMessage(exportError));
     } finally {
@@ -407,26 +455,22 @@ export default function App() {
     }
   }
 
-  async function exportSelectedStems() {
-    if (!analysis) return;
-    if (!exportStemSelection.length) {
-      setError("내보낼 파트를 하나 이상 선택하세요.");
-      return;
-    }
-    setExportBusy(true);
-    setError(null);
-    try {
-      if (exportSeparateStems) {
-        await downloadExport(exportStemsUrl(analysis.job_id, exportStemSelection, "zip"), `${safeFileBase(activeSongTitle)}-stems.zip`);
-      } else {
-        await downloadExport(exportStemsUrl(analysis.job_id, exportStemSelection, "mix"), `${safeFileBase(activeSongTitle)}-selected-stems.m4a`);
-      }
-      setModalView(null);
-    } catch (exportError) {
-      setError(normalizeErrorMessage(exportError));
-    } finally {
-      setExportBusy(false);
-    }
+  function exportWholeSong() {
+    if (analysis && canPlayStems) void downloadExport(exportMixUrl(analysis.job_id, exportFormat), "mix");
+  }
+
+  function exportInstrumental() {
+    if (analysis && canPlayStems) void downloadExport(exportInstrumentalUrl(analysis.job_id, exportFormat), "instrumental");
+  }
+
+  function exportStems(mode: "mix" | "zip" | "single", selection: StemName[]) {
+    if (!analysis || !canPlayStems || !selection.length) return;
+    const suffix = mode === "single" ? selection[0] : mode === "zip" ? "stems" : "selected-stems";
+    void downloadExport(
+      exportStemsUrl(analysis.job_id, selection, mode, exportFormat),
+      suffix,
+      mode === "zip" ? "zip" : exportFormat
+    );
   }
 
   function toggleExportStem(stem: StemName) {
@@ -497,8 +541,28 @@ export default function App() {
     return null;
   }
 
+  function synchronizeAudioElements(master: HTMLAudioElement) {
+    if (!analysis || master.paused || master.seeking) return;
+    master.playbackRate = 1;
+    for (const stem of analysis.stems) {
+      const audio = audioRefs.current[stem.name];
+      if (!audio || audio === master || audio.paused || audio.seeking || audio.readyState < 2) continue;
+      const drift = audio.currentTime - master.currentTime;
+      if (Math.abs(drift) > 0.075) {
+        audio.currentTime = Math.min(master.currentTime, Math.max(0, audio.duration || duration));
+        audio.playbackRate = 1;
+      } else if (Math.abs(drift) > 0.008) {
+        // Tiny rate corrections are inaudible with pitch preservation and keep
+        // independently decoded stems locked without repeated hard seeks.
+        audio.playbackRate = Math.max(0.985, Math.min(1.015, 1 - drift * 0.35));
+      } else {
+        audio.playbackRate = 1;
+      }
+    }
+  }
+
   async function togglePlayback() {
-    if (!analysis) return;
+    if (!analysis || !canPlayStems) return;
     const nextPlaying = !isPlaying;
     setIsPlaying(nextPlaying);
     if (nextPlaying) {
@@ -516,8 +580,11 @@ export default function App() {
       .map((stem) => audioRefs.current[stem.name])
       .filter((audio): audio is HTMLAudioElement => Boolean(audio));
     if (nextPlaying) {
+      lastAudioSyncRef.current = 0;
       await Promise.allSettled(
         audible.map(async (audio) => {
+          audio.playbackRate = 1;
+          audio.preservesPitch = true;
           audio.currentTime = Math.min(currentTime, Math.max(0, audio.duration || duration));
           await audio.play();
         })
@@ -528,7 +595,11 @@ export default function App() {
   }
 
   function pauseAll() {
-    Object.values(audioRefs.current).forEach((audio) => audio?.pause());
+    Object.values(audioRefs.current).forEach((audio) => {
+      if (!audio) return;
+      audio.pause();
+      audio.playbackRate = 1;
+    });
   }
 
   function stopPlayback() {
@@ -541,7 +612,10 @@ export default function App() {
     const clamped = Math.max(0, Math.min(time, duration || 30));
     setCurrentTime(clamped);
     Object.values(audioRefs.current).forEach((audio) => {
-      if (audio) audio.currentTime = clamped;
+      if (audio) {
+        audio.playbackRate = 1;
+        audio.currentTime = clamped;
+      }
     });
   }
 
@@ -557,6 +631,17 @@ export default function App() {
     return audioContextRef.current;
   }
 
+  function ensureMasterGain(context: AudioContext) {
+    const existing = masterGainRef.current;
+    if (existing && existing.context === context) return existing;
+    existing?.disconnect();
+    const master = context.createGain();
+    master.gain.value = globalVolume;
+    master.connect(context.destination);
+    masterGainRef.current = master;
+    return master;
+  }
+
   function ensurePanGraph(stemName: StemName, audio: HTMLAudioElement) {
     const existing = panGraphRefs.current[stemName];
     if (existing?.audio === audio) return existing;
@@ -570,7 +655,7 @@ export default function App() {
       const source = context.createMediaElementSource(audio);
       const panner = context.createStereoPanner();
       source.connect(panner);
-      panner.connect(context.destination);
+      panner.connect(ensureMasterGain(context));
       const graph = { audio, source, panner };
       panGraphRefs.current[stemName] = graph;
       return graph;
@@ -590,7 +675,7 @@ export default function App() {
     gain.gain.setValueAtTime(accent ? 0.32 : 0.22, start);
     gain.gain.exponentialRampToValueAtTime(0.001, start + 0.07);
     oscillator.connect(gain);
-    gain.connect(context.destination);
+    gain.connect(ensureMasterGain(context));
     oscillator.start(start);
     oscillator.stop(start + 0.075);
   }
@@ -715,7 +800,7 @@ export default function App() {
           <button className="toolButton" data-tooltip="이전곡" aria-label="이전곡" onClick={() => seek(0)}><Icon name="rewind" /></button>
           <button className="toolButton" data-tooltip="다음곡" aria-label="다음곡" onClick={() => seek(duration || 30)}><Icon name="forward" /></button>
           <button className="toolButton" data-tooltip="멈춤" aria-label="멈춤" onClick={stopPlayback}><Icon name="stop" /></button>
-          <button className="toolButton playButton" data-tooltip="재생" aria-label="재생" onClick={togglePlayback} disabled={!analysis}>
+          <button className="toolButton playButton" data-tooltip="재생" aria-label="재생" onClick={togglePlayback} disabled={!canPlayStems}>
             <Icon name={isPlaying ? "pause" : "play"} />
           </button>
           <button className={`toolButton ${volumeOpen ? "active" : ""}`} data-tooltip="소리 크기" aria-label="소리 크기" onClick={() => setVolumeOpen((open) => !open)}><Icon name="speaker" /></button>
@@ -723,11 +808,11 @@ export default function App() {
 
         <div className="lcd" role="button" tabIndex={0} onClick={() => setSongInfoOpen((open) => !open)}>
           <span className="songName">{activeSongTitle}</span>
-          <Metric value={String(bar).padStart(3, "0")} label="BAR" />
-          <Metric value={String(beat)} label="BEAT" />
-          <Metric value={String(div)} label="DIV" />
-          <Metric value={String(tick).padStart(3, "0")} label="TICK" />
-          <Metric value={String(Math.round(bpm))} label="TEMPO" />
+          <Metric value={analysisSkipped ? "--" : String(bar).padStart(3, "0")} label="BAR" />
+          <Metric value={analysisSkipped ? "--" : String(beat)} label="BEAT" />
+          <Metric value={analysisSkipped ? "--" : String(div)} label="DIV" />
+          <Metric value={analysisSkipped ? "--" : String(tick).padStart(3, "0")} label="TICK" />
+          <Metric value={analysisSkipped ? "--" : String(Math.round(bpm))} label="TEMPO" />
           <Metric value={transportKey} label="KEY" />
           <Metric value="4/4" label="TIME" />
         </div>
@@ -735,7 +820,8 @@ export default function App() {
         <div className="toolbarTail">
           <div className="toolbarGroup analysisTools">
             <button
-              className={`toolButton ${metronomeOn ? "active" : ""}`}
+              className={`toolButton ${metronomeOn && !analysisSkipped ? "active" : ""}`}
+              disabled={analysisSkipped}
               data-tooltip="메트로놈"
               aria-label="메트로놈"
               onClick={() => {
@@ -756,7 +842,7 @@ export default function App() {
           <div className="toolbarSpacer wide" aria-hidden="true" />
           <div className="toolbarGroup outputTools">
             <button className="toolButton" data-tooltip="더보기" aria-label="더보기"><Icon name="more" /></button>
-            <button className="toolButton exportButton" data-tooltip="내보내기" aria-label="내보내기" onClick={openExportModal} disabled={!analysis}><Icon name="upload" /></button>
+            <button className="toolButton exportButton" data-tooltip="내보내기" aria-label="내보내기" onClick={openExportModal} disabled={!canPlayStems}><Icon name="upload" /></button>
             <button className="toolButton" data-tooltip="추가" aria-label="추가" onClick={() => setModalView("add")}><Icon name="plus" /></button>
           </div>
         </div>
@@ -766,7 +852,7 @@ export default function App() {
           profileOpen={profileOpen}
           volumeOpen={volumeOpen}
           songInfoOpen={songInfoOpen}
-          metronomeOn={metronomeOn}
+          metronomeOn={metronomeOn && !analysisSkipped}
           repeatOn={repeatOn}
           globalVolume={globalVolume}
           onVolume={setGlobalVolume}
@@ -912,6 +998,7 @@ export default function App() {
                   key={stem.name}
                   color={stem.color}
                   waveform={stem.waveform}
+                  emptyLabel={emptyStemLabel(separationStatus)}
                   duration={displayDuration}
                   currentTime={currentTime}
                   onSeek={seek}
@@ -919,9 +1006,10 @@ export default function App() {
               ))}
             </div>
           </div>
-          {analysis?.stems.map((stem) => (
+          {analysis?.stems.filter((stem) => stem.audio_url).map((stem) => (
             <audio
               key={stem.name}
+              preload="auto"
               ref={(node) => {
                 audioRefs.current[stem.name] = node;
               }}
@@ -936,19 +1024,27 @@ export default function App() {
         <section className="editorPanel">
           <div className="editorTitle">
             <strong>{lyricsVisible ? "가사" : "분석"}</strong>
-            <span>{analysis ? `${formatTime(analysis.duration)} · ${analysis.chords.length}개 코드 · ${analysis.beats.length}개 비트` : "분석 결과 대기 중"}</span>
+            <span>{analysis ? `${formatTime(analysis.duration)} · ${analysisSkipped ? "스템 분리만" : `${analysis.chords.length}개 코드 · ${analysis.beats.length}개 비트`}` : "분석 결과 대기 중"}</span>
           </div>
           {chordsVisible && <ChordTimeline analysis={analysis} currentTime={currentTime} onSeek={seek} />}
           {lyricsVisible && <LyricsPanel title={activeSongTitle} />}
           <div className="editorDetails">
-            <span>BPM <strong>{analysis ? Math.round(analysis.bpm) : "--"}</strong></span>
-            <span>KEY <strong>{analysis ? `${analysis.key} ${modeLabel(analysis.mode)}` : "--"}</strong></span>
+            <span>BPM <strong>{analysis && !analysisSkipped ? Math.round(analysis.bpm) : "--"}</strong></span>
+            <span>KEY <strong>{analysis && !analysisSkipped ? `${analysis.key} ${modeLabel(analysis.mode)}` : "--"}</strong></span>
             <span>MIDI <strong>{analysis ? analysis.stems.filter((stem) => stem.midi_url).length : 0}</strong></span>
-            <span>METRO <strong>{metronomeOn ? "ON" : "OFF"}</strong></span>
+            <span>METRO <strong>{metronomeOn && !analysisSkipped ? "ON" : "OFF"}</strong></span>
             <span>LOOP <strong>{repeatOn ? "ON" : "OFF"}</strong></span>
             <span>CHORD <strong>{currentChord}</strong></span>
             {(error || job?.error) && <em>{normalizeErrorMessage(error ?? job?.error)}</em>}
           </div>
+          {separationStatus && separationStatus !== "unverified" && (
+            <div className={`separationNotice ${separationStatus === "failed" ? "failed" : ""}`} role="status">
+              <strong>{separationLabel(separationStatus)}</strong>
+              {analysis?.actual_separation_engine && <span>{SEPARATION_ENGINES[analysis.actual_separation_engine]}</span>}
+              {analysis?.separation_cache_hit && <span>저장된 스템 재사용</span>}
+              {separationError && <span>{separationError}</span>}
+            </div>
+          )}
           {(job?.warnings.length || analysis?.warnings.length) ? (
             <div className="warnings">
               {(analysis?.warnings ?? job?.warnings ?? []).map((warning, index) => <p key={`${warning}-${index}`}>{translateWarning(warning)}</p>)}
@@ -961,19 +1057,31 @@ export default function App() {
         <ModalLayer
           view={modalView}
           fileName={uploadFileName}
-          job={job}
-          progress={progress}
+          job={modalView === "upload" && !uploadFileName ? null : job}
+          progress={modalView === "upload" && !uploadFileName ? 0 : progress}
           error={error}
           analysis={analysis}
           exportStemSelection={exportStemSelection}
           exportSeparateStems={exportSeparateStems}
           exportBusy={exportBusy}
+          exportFormat={exportFormat}
+          separationQuality={separationQuality}
+          separationEngine={separationEngine}
+          stemsOnly={stemsOnly}
+          uploadBusy={uploadBusy}
+          onExportFormatChange={setExportFormat}
+          onQualityChange={setSeparationQuality}
+          onEngineChange={setSeparationEngine}
+          onStemsOnlyChange={setStemsOnly}
           onClose={() => setModalView(null)}
           onAddFolder={addFolder}
-          onOpenUpload={() => setModalView("upload")}
+          onOpenUpload={openUploadModal}
           onFile={handleFile}
           onExportWhole={exportWholeSong}
-          onExportSelected={exportSelectedStems}
+          onExportInstrumental={exportInstrumental}
+          onExportSelected={() => exportStems(exportSeparateStems ? "zip" : "mix", exportStemSelection)}
+          onExportAllStems={() => exportStems("zip", exportableStems)}
+          onExportSingle={(stem) => exportStems("single", [stem])}
           onToggleExportStem={toggleExportStem}
           onExportSeparateChange={setExportSeparateStems}
         />
@@ -1055,7 +1163,9 @@ function TopPopovers({
       {songInfoOpen && (
         <div className="popover infoPopover">
           <strong>{songTitle}</strong>
-          <span>{analysis ? `${formatTime(analysis.duration)} · ${Math.round(analysis.bpm)} BPM · ${analysis.key} ${modeLabel(analysis.mode)}` : statusLabel(job?.status ?? "ready")}</span>
+          <span>{analysis ? formatTime(analysis.duration) : statusLabel(job?.status ?? "ready")}
+            {analysis && analysis.music_analysis !== false && ` · ${Math.round(analysis.bpm)} BPM · ${analysis.key} ${modeLabel(analysis.mode)}`}
+          </span>
           <small>메트로놈 {metronomeOn ? "켜짐" : "꺼짐"} · 연속 재생 {repeatOn ? "켜짐" : "꺼짐"}</small>
         </div>
       )}
@@ -1083,12 +1193,24 @@ function ModalLayer({
   exportStemSelection,
   exportSeparateStems,
   exportBusy,
+  exportFormat,
+  separationQuality,
+  separationEngine,
+  stemsOnly,
+  uploadBusy,
+  onExportFormatChange,
+  onQualityChange,
+  onEngineChange,
+  onStemsOnlyChange,
   onClose,
   onAddFolder,
   onOpenUpload,
   onFile,
   onExportWhole,
+  onExportInstrumental,
   onExportSelected,
+  onExportAllStems,
+  onExportSingle,
   onToggleExportStem,
   onExportSeparateChange
 }: {
@@ -1101,12 +1223,24 @@ function ModalLayer({
   exportStemSelection: StemName[];
   exportSeparateStems: boolean;
   exportBusy: boolean;
+  exportFormat: AudioFormat;
+  separationQuality: SeparationQuality;
+  separationEngine: SeparationEngine | "";
+  stemsOnly: boolean;
+  uploadBusy: boolean;
+  onExportFormatChange: (format: AudioFormat) => void;
+  onQualityChange: (quality: SeparationQuality) => void;
+  onEngineChange: (engine: SeparationEngine | "") => void;
+  onStemsOnlyChange: (value: boolean) => void;
   onClose: () => void;
   onAddFolder: () => void;
   onOpenUpload: () => void;
   onFile: (file: File) => void | Promise<void>;
   onExportWhole: () => void | Promise<void>;
+  onExportInstrumental: () => void;
   onExportSelected: () => void | Promise<void>;
+  onExportAllStems: () => void;
+  onExportSingle: (stem: StemName) => void;
   onToggleExportStem: (stem: StemName) => void;
   onExportSeparateChange: (separate: boolean) => void;
 }) {
@@ -1136,40 +1270,55 @@ function ModalLayer({
         <section className="modalPanel exportModal" role="dialog" aria-modal="true" aria-label="내보내기">
           <button className="modalClose" aria-label="닫기" onClick={onClose}>×</button>
           <strong>내보내기</strong>
+          <label className="modalSelect">
+            파일 형식
+            <select value={exportFormat} disabled={exportBusy} onChange={(event) => onExportFormatChange(event.target.value as AudioFormat)}>
+              <option value="wav">WAV · PCM</option>
+              <option value="flac">FLAC · 무손실 압축</option>
+              <option value="m4a">M4A · AAC</option>
+            </select>
+          </label>
+          {analysis && !analysis.stem_audio && <small>이전 작업의 저장된 스템에서 변환합니다. AAC 원본의 손실은 복원되지 않습니다.</small>}
           <div className="exportChoices">
-            <button disabled={!analysis || exportBusy} onClick={() => void onExportWhole()}>
-              <span>전체</span>
-              <small>현재 열려있는 노래 믹스</small>
-            </button>
+            <div className="exportActions">
+              <button disabled={exportBusy} onClick={() => void onExportWhole()}>전체 믹스 다운로드</button>
+              <button disabled={exportBusy} onClick={onExportInstrumental}>Instrumental 다운로드</button>
+              <button disabled={exportBusy} onClick={onExportAllStems}>6개 스템 ZIP 다운로드</button>
+            </div>
             <div className="stemExportBox">
               <span>파트별</span>
-              <small>{exportSeparateStems ? "선택한 파트를 DAW용 WAV ZIP으로 저장 · Ableton Warp 끄기" : "선택한 파트를 합쳐서 오디오 1개로 저장"}</small>
               <div className="stemChecks">
                 {exportableStems.map((stem) => (
-                  <label key={stem.name}>
-                    <input
-                      type="checkbox"
-                      checked={exportStemSelection.includes(stem.name)}
-                      onChange={() => onToggleExportStem(stem.name)}
-                    />
-                    <b style={{ background: stem.color }} />
-                    {STEM_LABELS[stem.name]}
-                  </label>
+                  <div className="stemExportRow" key={stem.name}>
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={exportStemSelection.includes(stem.name)}
+                        disabled={exportBusy}
+                        onChange={() => onToggleExportStem(stem.name)}
+                      />
+                      <b style={{ background: stem.color }} />
+                      {STEM_LABELS[stem.name]}
+                    </label>
+                    <button type="button" disabled={exportBusy} onClick={() => onExportSingle(stem.name)} aria-label={`${STEM_LABELS[stem.name]} 다운로드`}>↓</button>
+                  </div>
                 ))}
               </div>
               <label className="exportModeToggle">
                 <input
                   type="checkbox"
                   checked={exportSeparateStems}
+                  disabled={exportBusy}
                   onChange={(event) => onExportSeparateChange(event.target.checked)}
                 />
-                ZIP으로 개별 WAV 내보내기
+                선택한 파트를 ZIP으로 묶기
               </label>
-              <button className="exportSubmit" disabled={!analysis || exportBusy || !exportStemSelection.length} onClick={() => void onExportSelected()}>
-                {exportBusy ? "내보내는 중" : "선택한 파트 내보내기"}
+              <button className="exportSubmit" disabled={exportBusy || !exportStemSelection.length} onClick={() => void onExportSelected()}>
+                선택한 파트 {exportSeparateStems ? "ZIP" : "믹스"} 다운로드
               </button>
             </div>
           </div>
+          {exportBusy && <small role="status">내보내는 중</small>}
           {error && <p className="modalError">{error}</p>}
         </section>
       )}
@@ -1178,9 +1327,31 @@ function ModalLayer({
         <section className="modalPanel uploadModal" role="dialog" aria-modal="true" aria-label="노래 업로드">
           <button className="modalClose" aria-label="닫기" onClick={onClose}>×</button>
           <strong>노래 업로드</strong>
+          <label className="modalSelect">
+            분리 품질
+            <select value={separationQuality} disabled={uploadBusy} onChange={(event) => onQualityChange(event.target.value as SeparationQuality)}>
+              <option value="standard">Standard</option>
+              <option value="high">High Quality</option>
+            </select>
+          </label>
+          {separationQuality === "high" && <small>여러 번 추론하므로 더 오래 걸리며, 개선 폭은 곡에 따라 다릅니다.</small>}
+          <label className="modalSelect">
+            분리 엔진
+            <select value={separationEngine} disabled={uploadBusy} onChange={(event) => onEngineChange(event.target.value as SeparationEngine | "")}>
+              <option value="">서버 기본값</option>
+              <option value="torch">PyTorch</option>
+              <option value="mps">PyTorch MPS · Mac</option>
+              <option value="mlx">Fast · MLX · Apple Silicon</option>
+            </select>
+          </label>
+          <label className="modalSelect">
+            <input type="checkbox" checked={stemsOnly} disabled={uploadBusy} onChange={(event) => onStemsOnlyChange(event.target.checked)} />
+            스템만 분리 (BPM·키·코드 및 MIDI 생략)
+          </label>
           <label className="fileDropButton">
             <input
               type="file"
+              disabled={uploadBusy}
               accept=".mp3,.wav,audio/mpeg,audio/wav"
               onChange={(event) => {
                 const file = event.target.files?.[0];
@@ -1192,12 +1363,13 @@ function ModalLayer({
             <small>MP3 또는 WAV</small>
           </label>
           <div className="uploadStatus">
-            <span>{status}</span>
+            <span>{uploadBusy ? "업로드 중" : status}</span>
             <strong>{progress}%</strong>
             <div className="meterBar">
               <div style={{ width: `${progress}%` }} />
             </div>
-            <p>{error || job?.error ? normalizeErrorMessage(error ?? job?.error) : message}</p>
+            <p>{error || job?.error ? normalizeErrorMessage(error ?? job?.error) : uploadBusy ? "파일을 전송하고 있습니다." : message}</p>
+            {job?.separation_error && <p className="separationNotice failed">{job.separation_error}</p>}
           </div>
         </section>
       )}
@@ -1430,12 +1602,14 @@ function TrackControlsRow({
 function RegionLane({
   color,
   waveform,
+  emptyLabel,
   duration,
   currentTime,
   onSeek
 }: {
   color: string;
   waveform: number[];
+  emptyLabel: string;
   duration: number;
   currentTime: number;
   onSeek: (time: number) => void;
@@ -1459,7 +1633,7 @@ function RegionLane({
               <path d={wavePath} />
             </svg>
           ) : (
-            <small>분석 대기 중</small>
+            <small>{emptyLabel}</small>
           )}
         </div>
       </div>
@@ -1515,6 +1689,29 @@ function modeLabel(mode: string) {
   return mode;
 }
 
+function emptyStemLabel(status: SeparationStatus | undefined) {
+  if (status === "failed") return "분리된 오디오 없음";
+  if (status === "succeeded") return "저장된 파형 없음";
+  return "분리 대기 중";
+}
+
+const SEPARATION_ENGINES: Record<SeparationEngine, string> = {
+  torch: "PyTorch",
+  mps: "PyTorch MPS",
+  mlx: "MLX"
+};
+
+function separationLabel(status: SeparationStatus) {
+  const labels: Record<SeparationStatus, string> = {
+    pending: "스템 분리 대기 중",
+    running: "스템 분리 중",
+    succeeded: "6개 스템 분리 완료",
+    failed: "스템 분리 실패",
+    unverified: "스템 분리 확인 대기 중"
+  };
+  return labels[status];
+}
+
 function translateWarning(warning: string) {
   if (warning.includes("ffmpeg not found") && warning.includes("MP3 conversion")) {
     return "ffmpeg가 설치되어 있지 않아 MP3 변환을 건너뛰고 테스트용 무음 오디오로 처리했습니다.";
@@ -1525,14 +1722,8 @@ function translateWarning(warning: string) {
   if (warning.includes("WAV 파일이라 ffmpeg 재변환을 건너뛰고 바로 분석했습니다")) {
     return "WAV 파일이라 ffmpeg 재변환을 건너뛰고 바로 분석했습니다.";
   }
-  if (warning.includes("demucs command not found")) {
-    return "demucs 명령을 찾을 수 없어 실제 스템 분리 대신 fallback stems를 생성했습니다.";
-  }
-  if (warning.includes("Demucs finished but did not produce all 6 stems")) {
-    return "Demucs가 완료됐지만 6개 stem이 모두 생성되지 않아 fallback stems를 생성했습니다.";
-  }
-  if (warning.includes("Demucs unavailable or failed")) {
-    return "Demucs 실행에 실패해 fallback stems를 생성했습니다.";
+  if (warning.includes("fallback stems") || warning.includes("Demucs unavailable or failed") || warning.includes("demucs command not found")) {
+    return "이전 작업에서 Demucs 분리가 완료되지 않았습니다.";
   }
   if (warning.includes("librosa analysis unavailable or failed")) {
     return "librosa가 설치되어 있지 않거나 분석에 실패해 임시 BPM/key/chord 분석 결과를 생성했습니다.";
@@ -1569,7 +1760,7 @@ function stemPlaceholders() {
 function applyStemPalette(analysis: Analysis): Analysis {
   return {
     ...analysis,
-    chords: normalizeChordTimeline(analysis.chords, analysis.duration),
+    chords: analysis.music_analysis === false ? [] : normalizeChordTimeline(analysis.chords, analysis.duration),
     stems: analysis.stems.map((stem) => ({
       ...stem,
       color: STEM_COLORS[stem.name] ?? stem.color

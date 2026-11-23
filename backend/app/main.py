@@ -1,35 +1,48 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
+import logging
 import os
+import re
 import shutil
-import subprocess
 import tempfile
 import uuid
-import zipfile
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
-from fastapi import FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
+from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
-from pydantic import BaseModel
+from starlette.concurrency import run_in_threadpool
+from pydantic import BaseModel, ValidationError
 
-from .processor import JobState, MusicProcessor, find_executable, now_iso
+from . import exports
+from .exports import AudioFormat
+from .processor import (
+    STEMS, JobState, MusicProcessor, SeparationQuality, SeparationStatus,
+    cleanup_failed_artifacts, demucs_installed, env_flag, find_executable, now_iso,
+)
+
+from .separation import Engine, MODEL as DEMUCS_MODEL, default_engine
 
 
 BASE_DIR = Path(__file__).resolve().parents[1]
-STORAGE_DIR = BASE_DIR / "storage"
+# The desktop app supplies a writable Application Support directory.  Keeping
+# generated audio there avoids attempting to write inside the signed .app bundle.
+STORAGE_DIR = Path(os.getenv("MUSIC_APP_DATA_DIR", str(BASE_DIR / "storage"))).expanduser().resolve()
 UPLOADS_DIR = STORAGE_DIR / "uploads"
 JOBS_DIR = STORAGE_DIR / "jobs"
 ALLOWED_SUFFIXES = {".mp3", ".wav"}
-STALE_INCOMPLETE_JOB_SECONDS = 20 * 60
-EXPORT_STEMS = {"vocals", "drums", "bass", "guitar", "piano", "other"}
-EXPORT_SAMPLE_RATE = 44100
+EXPORTS_DIR = STORAGE_DIR / "exports"
+MAX_UPLOAD_BYTES = int(os.getenv("MUSIC_MAX_UPLOAD_MB", "150")) * 1024 * 1024
+MAX_PENDING_JOBS = int(os.getenv("MUSIC_MAX_PENDING_JOBS", "8"))
+export_lock = asyncio.Lock()
+logger = logging.getLogger(__name__)
 
 
 class JobResponse(BaseModel):
@@ -42,6 +55,14 @@ class JobResponse(BaseModel):
     original_filename: str
     warnings: list[str] = []
     error: str | None = None
+    separation_quality: SeparationQuality = "standard"
+    separation_status: SeparationStatus = "unverified"
+    separation_error: str | None = None
+    separation_engine: Engine = "torch"
+    actual_separation_engine: Engine | None = None
+    separation_cache_hit: bool = False
+    music_analysis: bool = True
+    midi: bool = True
 
 
 class JobStore:
@@ -49,40 +70,65 @@ class JobStore:
         self.jobs: dict[str, JobState] = {}
         self.queue: asyncio.Queue[str] = asyncio.Queue()
         self.lock = asyncio.Lock()
+        self.active_uploads: dict[str, tuple[str, str, SeparationQuality, Engine, bool, bool]] = {}
 
-    async def create(self, upload: UploadFile) -> JobState:
-        suffix = Path(upload.filename or "").suffix.lower()
+    async def create(
+        self, upload: UploadFile, quality: SeparationQuality,
+        engine: Engine, music_analysis: bool, midi: bool,
+    ) -> JobState:
+        safe_name = Path(upload.filename or "").name
+        suffix = Path(safe_name).suffix.lower()
         if suffix not in ALLOWED_SUFFIXES:
-            raise HTTPException(status_code=400, detail="mp3와 wav 파일만 업로드할 수 있습니다.")
+            raise HTTPException(400, "mp3와 wav 파일만 업로드할 수 있습니다.")
+        if upload.size is not None and upload.size > MAX_UPLOAD_BYTES:
+            raise HTTPException(413, f"업로드 한도는 {MAX_UPLOAD_BYTES // 1024**2}MB입니다.")
 
         job_id = uuid.uuid4().hex
         job_dir = JOBS_DIR / job_id
         upload_dir = UPLOADS_DIR / job_id
-        job_dir.mkdir(parents=True, exist_ok=True)
-        upload_dir.mkdir(parents=True, exist_ok=True)
-
-        safe_name = Path(upload.filename or f"upload{suffix}").name
         source_path = upload_dir / safe_name
-        with source_path.open("wb") as handle:
-            while chunk := await upload.read(1024 * 1024):
-                handle.write(chunk)
+        fingerprint = hashlib.sha256()
+        size = 0
+        accepted = False
+        try:
+            upload_dir.mkdir()
+            with source_path.open("wb") as handle:
+                while chunk := await upload.read(1024 * 1024):
+                    size += len(chunk)
+                    if size > MAX_UPLOAD_BYTES:
+                        raise HTTPException(413, f"업로드 한도는 {MAX_UPLOAD_BYTES // 1024**2}MB입니다.")
+                    fingerprint.update(chunk)
+                    handle.write(chunk)
+            if not size:
+                raise HTTPException(400, "빈 오디오 파일은 업로드할 수 없습니다.")
 
-        state = JobState(
-            id=job_id,
-            status="queued",
-            progress=0.0,
-            message="대기열에 추가됨",
-            created_at=now_iso(),
-            updated_at=now_iso(),
-            original_filename=safe_name,
-            source_path=str(source_path),
-            job_dir=str(job_dir),
-        )
-        async with self.lock:
-            self.jobs[job_id] = state
-            self._write_state(state)
-        await self.queue.put(job_id)
-        return state
+            digest = fingerprint.hexdigest()
+            signature = (digest, safe_name, quality, engine, music_analysis, midi)
+            async with self.lock:
+                for existing_id, existing in self.active_uploads.items():
+                    if existing == signature and self.jobs[existing_id].status in {"queued", "running"}:
+                        return self.jobs[existing_id]
+                pending = sum(state.status in {"queued", "running"} for state in self.jobs.values())
+                if pending >= MAX_PENDING_JOBS:
+                    raise HTTPException(429, "작업 대기열이 가득 찼습니다. 잠시 후 다시 업로드하세요.")
+
+                state = JobState(
+                    id=job_id, status="queued", progress=0.0, message="대기열에 추가됨",
+                    created_at=now_iso(), updated_at=now_iso(), original_filename=safe_name,
+                    source_path=str(source_path), job_dir=str(job_dir),
+                    separation_quality=quality, separation_status="pending",
+                    separation_engine=engine, music_analysis=music_analysis, midi=midi, audio_digest=digest,
+                )
+                self._write_state(state)
+                self.jobs[job_id] = state
+                self.active_uploads[job_id] = signature
+                self.queue.put_nowait(job_id)
+                accepted = True
+                return state
+        finally:
+            if not accepted:
+                shutil.rmtree(upload_dir, ignore_errors=True)
+                shutil.rmtree(job_dir, ignore_errors=True)
 
     async def get(self, job_id: str) -> JobState:
         async with self.lock:
@@ -111,9 +157,12 @@ class JobStore:
     async def delete(self, job_id: str) -> None:
         state = await self.get(job_id)
         async with self.lock:
+            if state.status == "running":
+                raise HTTPException(409, "처리 중인 작업입니다. 분석이 끝난 뒤 삭제할 수 있습니다.")
             self.jobs.pop(job_id, None)
-        shutil.rmtree(Path(state.job_dir), ignore_errors=True)
-        shutil.rmtree(Path(state.source_path).parent, ignore_errors=True)
+            self.active_uploads.pop(job_id, None)
+            shutil.rmtree(JOBS_DIR / state.id, ignore_errors=True)
+            shutil.rmtree(UPLOADS_DIR / state.id, ignore_errors=True)
 
     async def update(self, state: JobState) -> None:
         state.updated_at = now_iso()
@@ -121,20 +170,44 @@ class JobStore:
             self.jobs[state.id] = state
             self._write_state(state)
 
+    async def link_cached_stems(self, key: str, destination: Path) -> bool:
+        async with self.lock:
+            for job in reversed(self.jobs.values()):
+                if job.status != "done" or job.separation_status != "succeeded" or job.separation_cache_key != key:
+                    continue
+                try:
+                    destination.mkdir()
+                    for name in STEMS:
+                        filename = f"{name}.wav"
+                        os.link(JOBS_DIR / job.id / "stems" / filename, destination / filename)
+                except OSError:
+                    shutil.rmtree(destination, ignore_errors=True)
+                else:
+                    return True
+        return False
+
     def _write_state(self, state: JobState) -> None:
         path = JOBS_DIR / state.id / "job.json"
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(state.model_dump(), indent=2), encoding="utf-8")
+        temporary = path.with_suffix(".json.tmp")
+        temporary.write_text(state.model_dump_json(indent=2), encoding="utf-8")
+        temporary.replace(path)
 
     def _read_state(self, job_id: str) -> JobState | None:
-        path = JOBS_DIR / job_id / "job.json"
-        if not path.exists():
+        if not re.fullmatch(r"[0-9a-f]{32}", job_id):
             return None
-        return JobState(**json.loads(path.read_text(encoding="utf-8")))
+        path = JOBS_DIR / job_id / "job.json"
+        if not path.is_file():
+            return None
+        try:
+            return JobState.model_validate_json(path.read_text(encoding="utf-8"))
+        except (OSError, ValidationError):
+            logger.exception("Cannot load job %s", job_id)
+            return None
 
 
 store = JobStore()
-processor = MusicProcessor(store.update)
+processor = MusicProcessor(store.update, store.link_cached_stems)
 
 
 def configured_cors_origins() -> list[str]:
@@ -144,54 +217,56 @@ def configured_cors_origins() -> list[str]:
     return [origin.strip() for origin in raw.split(",") if origin.strip()]
 
 
-def cleanup_stale_incomplete_jobs() -> None:
-    if not JOBS_DIR.exists():
-        return
-    now = datetime.now(timezone.utc)
-    for job_path in JOBS_DIR.iterdir():
-        job_json = job_path / "job.json"
-        if not job_path.is_dir() or not job_json.exists():
+async def recover_interrupted_jobs() -> None:
+    for state in await store.list():
+        if state.status not in {"queued", "running"}:
             continue
-        try:
-            data = json.loads(job_json.read_text(encoding="utf-8"))
-            if data.get("status") == "done" or (job_path / "analysis.json").exists():
-                continue
-            updated_at = datetime.fromisoformat(str(data.get("updated_at", "")).replace("Z", "+00:00"))
-            if updated_at.tzinfo is None:
-                updated_at = updated_at.replace(tzinfo=timezone.utc)
-            if (now - updated_at).total_seconds() < STALE_INCOMPLETE_JOB_SECONDS:
-                continue
-            shutil.rmtree(job_path, ignore_errors=True)
-            source_path = data.get("source_path")
-            if source_path:
-                shutil.rmtree(Path(source_path).parent, ignore_errors=True)
-        except Exception:
-            continue
+        if (Path(state.job_dir) / "analysis.json").is_file():
+            state.status = "done"
+            state.progress = 1.0
+            state.message = "분석 완료"
+        else:
+            cleanup_failed_artifacts(Path(state.job_dir), Path(state.source_path))
+            state.separation_status = "failed"
+            state.status = "error"
+            state.error = state.separation_error = "서버가 재시작되어 작업이 중단되었습니다. 파일을 다시 업로드하세요."
+            state.message = "처리 중단"
+        await store.update(state)
 
 
 async def worker() -> None:
     while True:
         job_id = await store.queue.get()
         try:
-            state = await store.get(job_id)
+            async with store.lock:
+                state = store.jobs.get(job_id)
+                if state is None:
+                    continue
+                state.status = "running"
             await processor.process(state)
+        except Exception:
+            logger.exception("Music job failed: %s", job_id)
         finally:
+            store.active_uploads.pop(job_id, None)
             store.queue.task_done()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    STORAGE_DIR.mkdir(exist_ok=True)
-    UPLOADS_DIR.mkdir(exist_ok=True)
-    JOBS_DIR.mkdir(exist_ok=True)
-    cleanup_stale_incomplete_jobs()
+    for directory in (UPLOADS_DIR, JOBS_DIR):
+        directory.mkdir(parents=True, exist_ok=True)
+    shutil.rmtree(EXPORTS_DIR, ignore_errors=True)
+    EXPORTS_DIR.mkdir()
+    await recover_interrupted_jobs()
     task = asyncio.create_task(worker())
-    yield
-    task.cancel()
     try:
-        await task
-    except asyncio.CancelledError:
-        pass
+        yield
+    finally:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
 
 app = FastAPI(title="Local Music Analysis MVP", lifespan=lifespan)
@@ -204,6 +279,7 @@ if cors_origins:
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
+        expose_headers=["Content-Disposition"],
     )
 else:
     app.add_middleware(
@@ -212,11 +288,12 @@ else:
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
+        expose_headers=["Content-Disposition"],
     )
 
 
 def public_job(state: JobState) -> JobResponse:
-    return JobResponse(**state.model_dump(exclude={"source_path", "job_dir"}))
+    return JobResponse(**state.model_dump(exclude={"source_path", "job_dir", "audio_digest", "separation_cache_key"}))
 
 
 def safe_download_name(name: str, suffix: str) -> str:
@@ -225,111 +302,95 @@ def safe_download_name(name: str, suffix: str) -> str:
     return f"{safe[:80] or 'song'}{suffix}"
 
 
-def read_analysis_for_export(state: JobState) -> dict:
+def read_analysis(state: JobState) -> dict:
     analysis_path = Path(state.job_dir) / "analysis.json"
-    if state.status != "done" or not analysis_path.exists():
-        raise HTTPException(status_code=404, detail="분석 완료된 노래만 내보낼 수 있습니다.")
-    return json.loads(analysis_path.read_text(encoding="utf-8"))
+    if state.status != "done" or not analysis_path.is_file():
+        raise HTTPException(404, "분석 결과가 아직 준비되지 않았습니다.")
+    analysis = json.loads(analysis_path.read_text(encoding="utf-8"))
+    paths = resolve_stem_audio_paths(state, analysis)
+    legacy = "separation_status" not in analysis
+    fallback = legacy and any("fallback" in warning.lower() for warning in analysis.get("warnings", []))
+    if analysis.get("separation_status") != "failed" and not fallback and set(paths) == set(STEMS):
+        analysis["separation_status"] = "succeeded"
+        analysis["separation_error"] = None
+        if legacy:
+            # Older results could include synthetic peaks even for valid Demucs audio.
+            for stem in analysis["stems"]:
+                stem["waveform"] = []
+    else:
+        analysis["separation_status"] = "failed"
+        analysis["separation_error"] = analysis.get("separation_error") or (
+            "이 작업에는 확인 가능한 6개 스템 파일이 없습니다. 다시 업로드해 분리하세요."
+        )
+        for stem in analysis.get("stems", []):
+            stem.update(audio_url=None, midi_url=None, waveform=[])
+    return analysis
 
 
-def resolve_stem_audio_paths(state: JobState, selected_stems: list[str] | None = None) -> dict[str, Path]:
-    analysis = read_analysis_for_export(state)
+def resolve_stem_audio_paths(state: JobState, analysis: dict) -> dict[str, Path]:
     root = Path(state.job_dir).resolve()
-    selected = set(selected_stems or EXPORT_STEMS)
+    prefix = f"/api/jobs/{state.id}/assets/"
     paths: dict[str, Path] = {}
     for stem in analysis.get("stems", []):
         name = stem.get("name")
-        audio_url = stem.get("audio_url")
-        if name not in selected or not audio_url:
+        audio_url = stem.get("audio_url") or ""
+        if name not in STEMS or not audio_url.startswith(prefix):
             continue
-        asset_prefix = f"/api/jobs/{state.id}/assets/"
-        if not str(audio_url).startswith(asset_prefix):
-            continue
-        target = (root / str(audio_url)[len(asset_prefix):]).resolve()
-        if target.is_file() and root in target.parents:
+        target = (root / audio_url[len(prefix):]).resolve()
+        if root in target.parents and target.is_file() and target.stat().st_size > 0:
             paths[name] = target
     return paths
 
 
-def cleanup_export_path(path: Path) -> None:
-    shutil.rmtree(path.parent, ignore_errors=True)
-
-
-def create_mix_export(paths: dict[str, Path], job_id: str, suffix: str) -> Path:
-    ffmpeg = find_executable("ffmpeg")
-    if not ffmpeg:
-        raise HTTPException(status_code=503, detail="오디오 합치기에는 ffmpeg가 필요합니다.")
-
-    export_dir = Path(tempfile.mkdtemp(prefix=f"{job_id}-{suffix}-"))
-    output = export_dir / f"{suffix}.m4a"
-    cmd = [ffmpeg, "-y", "-nostdin", "-hide_banner", "-loglevel", "error"]
-    for path in paths.values():
-        cmd.extend(["-i", str(path)])
-    inputs = "".join(f"[{index}:a]" for index in range(len(paths)))
-    cmd.extend([
-        "-filter_complex",
-        f"{inputs}amix=inputs={len(paths)}:duration=longest:dropout_transition=0,volume={len(paths)}[mix]",
-        "-map",
-        "[mix]",
-        "-c:a",
-        "aac",
-        "-b:a",
-        os.getenv("MUSIC_EXPORT_BITRATE", "160k"),
-        "-movflags",
-        "+faststart",
-        str(output),
-    ])
-    completed = subprocess.run(cmd, capture_output=True, text=True, check=False)
-    if completed.returncode != 0 or not output.exists():
-        shutil.rmtree(export_dir, ignore_errors=True)
-        detail = completed.stderr.strip().splitlines()[-1] if completed.stderr.strip() else "오디오 합치기 실패"
-        raise HTTPException(status_code=500, detail=detail)
-    return output
-
-
-def create_aligned_wav_export(source: Path, target: Path, duration: float) -> None:
-    ffmpeg = find_executable("ffmpeg")
-    if not ffmpeg:
-        raise HTTPException(status_code=503, detail="DAW용 개별 파트 내보내기에는 ffmpeg가 필요합니다.")
-    if duration <= 0:
-        raise HTTPException(status_code=500, detail="노래 길이 정보가 없어 파트를 정렬할 수 없습니다.")
-
-    sample_count = max(1, round(duration * EXPORT_SAMPLE_RATE))
-    filter_chain = (
-        f"aresample={EXPORT_SAMPLE_RATE}:first_pts=0,"
-        "asetpts=N/SR/TB,"
-        f"apad,atrim=start_sample=0:end_sample={sample_count}"
+async def stem_download(
+    job_id: str,
+    mode: Literal["mix", "zip", "single"],
+    audio_format: AudioFormat,
+    suffix: str,
+    selected: list[str],
+) -> FileResponse:
+    # Prepare one export at a time while keeping the API event loop responsive.
+    # Export files are independent of the job directory once generation completes.
+    async with export_lock:
+        state = await store.get(job_id)
+        analysis = read_analysis(state)
+        if analysis["separation_status"] != "succeeded":
+            raise HTTPException(409, analysis["separation_error"])
+        available = resolve_stem_audio_paths(state, analysis)
+        paths = {name: available[name] for name in selected}
+        extension = "zip" if mode == "zip" else audio_format
+        filename = safe_download_name(state.original_filename, f"-{suffix}.{extension}")
+        directory = Path(tempfile.mkdtemp(prefix=f"{job_id}-", dir=EXPORTS_DIR))
+        output = directory / f"download.{extension}"
+        try:
+            if mode == "zip":
+                await run_in_threadpool(exports.export_zip, paths, output, Path(filename).stem, analysis, audio_format)
+            elif mode == "single":
+                source = next(iter(paths.values()))
+                await run_in_threadpool(exports.export_stem, source, output, audio_format)
+            else:
+                await run_in_threadpool(exports.export_mix, paths, output, audio_format)
+        except BaseException:
+            shutil.rmtree(directory, ignore_errors=True)
+            raise
+    return FileResponse(
+        output, media_type=exports.MEDIA_TYPES[extension], filename=filename,
+        background=BackgroundTask(shutil.rmtree, directory, ignore_errors=True),
     )
-    cmd = [
-        ffmpeg,
-        "-y",
-        "-nostdin",
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-i",
-        str(source),
-        "-af",
-        filter_chain,
-        "-ar",
-        str(EXPORT_SAMPLE_RATE),
-        "-ac",
-        "2",
-        "-map_metadata",
-        "-1",
-        "-c:a",
-        "pcm_s16le",
-        str(target),
-    ]
-    completed = subprocess.run(cmd, capture_output=True, text=True, check=False)
-    if completed.returncode != 0 or not target.exists():
-        detail = completed.stderr.strip().splitlines()[-1] if completed.stderr.strip() else "파트 WAV 정렬 실패"
-        raise HTTPException(status_code=500, detail=detail)
 
 
 @app.get("/api/health")
-def health() -> dict[str, str]:
-    return {"status": "ok", "app": "local-music-analysis"}
+def health() -> dict:
+    return {
+        "status": "ok",
+        "app": "local-music-analysis",
+        "ffmpeg": bool(find_executable("ffmpeg")),
+        "separation": {
+            "enabled": env_flag("MUSIC_ENABLE_DEMUCS", True),
+            "demucs_installed": demucs_installed(),
+            "model": DEMUCS_MODEL,
+        },
+    }
 
 
 @app.options("/api/{path:path}")
@@ -338,8 +399,18 @@ def api_options(path: str) -> Response:
 
 
 @app.post("/api/jobs", response_model=JobResponse)
-async def create_job(file: Annotated[UploadFile, File(...)]) -> JobResponse:
-    state = await store.create(file)
+async def create_job(
+    file: Annotated[UploadFile, File(...)],
+    quality: Annotated[SeparationQuality, Form()] = "standard",
+    engine: Annotated[Engine | None, Form()] = None,
+    music_analysis: Annotated[bool, Form()] = True,
+    midi: Annotated[bool, Form()] = True,
+) -> JobResponse:
+    try:
+        requested = engine or default_engine()
+    except ValueError as exc:
+        raise HTTPException(503, str(exc)) from exc
+    state = await store.create(file, quality, requested, music_analysis, midi)
     return public_job(state)
 
 
@@ -351,11 +422,7 @@ async def list_jobs() -> list[JobResponse]:
 
 @app.get("/api/jobs/{job_id}/analysis")
 async def get_analysis(job_id: str) -> dict:
-    state = await store.get(job_id)
-    analysis_path = Path(state.job_dir) / "analysis.json"
-    if state.status != "done" or not analysis_path.exists():
-        raise HTTPException(status_code=404, detail="분석 결과가 아직 준비되지 않았습니다.")
-    return json.loads(analysis_path.read_text(encoding="utf-8"))
+    return read_analysis(await store.get(job_id))
 
 
 @app.get("/api/jobs/{job_id}/assets/{asset_path:path}")
@@ -365,78 +432,39 @@ async def get_asset(job_id: str, asset_path: str) -> FileResponse:
     target = (root / asset_path).resolve()
     if not target.is_file() or root not in target.parents:
         raise HTTPException(status_code=404, detail="파일을 찾을 수 없습니다.")
+    if state.separation_status == "unverified" and target.is_relative_to(root / "stems"):
+        if read_analysis(state)["separation_status"] != "succeeded":
+            raise HTTPException(404, "확인된 스템 오디오가 없습니다.")
     return FileResponse(target)
 
 
 @app.get("/api/jobs/{job_id}/export/mix")
-async def export_mix(job_id: str) -> FileResponse:
-    state = await store.get(job_id)
-    paths = resolve_stem_audio_paths(state)
-    if not paths:
-        raise HTTPException(status_code=404, detail="내보낼 오디오 파일이 없습니다.")
+async def export_mix(job_id: str, format: AudioFormat = "m4a") -> FileResponse:
+    return await stem_download(job_id, "mix", format, "mix", STEMS)
 
-    output = create_mix_export(paths, job_id, "mix")
 
-    return FileResponse(
-        output,
-        media_type="audio/mp4",
-        filename=safe_download_name(state.original_filename, "-mix.m4a"),
-        background=BackgroundTask(cleanup_export_path, output),
-    )
+@app.get("/api/jobs/{job_id}/export/instrumental")
+async def export_instrumental(job_id: str, format: AudioFormat = "wav") -> FileResponse:
+    selected = [stem for stem in STEMS if stem != "vocals"]
+    return await stem_download(job_id, "mix", format, "instrumental", selected)
 
 
 @app.get("/api/jobs/{job_id}/export/stems")
-async def export_stems(job_id: str, stem: Annotated[list[str], Query()] = None, mode: str = "mix") -> FileResponse:
-    state = await store.get(job_id)
-    selected = [item for item in dict.fromkeys(stem or []) if item in EXPORT_STEMS]
-    if not selected:
-        raise HTTPException(status_code=400, detail="내보낼 파트를 하나 이상 선택하세요.")
-
-    analysis = read_analysis_for_export(state)
-    paths = resolve_stem_audio_paths(state, selected)
-    if not paths:
-        raise HTTPException(status_code=404, detail="선택한 파트의 오디오 파일이 없습니다.")
-
-    if mode == "mix":
-        output = create_mix_export(paths, job_id, "selected-stems")
-        return FileResponse(
-            output,
-            media_type="audio/mp4",
-            filename=safe_download_name(state.original_filename, "-selected-stems.m4a"),
-            background=BackgroundTask(cleanup_export_path, output),
-        )
-
-    export_dir = Path(tempfile.mkdtemp(prefix=f"{job_id}-stems-"))
-    output = export_dir / "stems.zip"
-    duration = float(analysis.get("duration") or 0)
-    sample_count = max(1, round(duration * EXPORT_SAMPLE_RATE)) if duration > 0 else 0
-    bpm = analysis.get("bpm")
-    key = analysis.get("key")
-    mode_label = analysis.get("mode")
-    with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        for name in selected:
-            path = paths.get(name)
-            if path:
-                aligned = export_dir / f"{name}.wav"
-                create_aligned_wav_export(path, aligned, duration)
-                archive.write(aligned, arcname=f"{name}.wav")
-        info = [
-            f"Title: {state.original_filename}",
-            f"BPM: {round(float(bpm), 3) if isinstance(bpm, (int, float)) else bpm or '--'}",
-            f"Key: {key or '--'} {mode_label or ''}".strip(),
-            f"Duration: {round(duration, 3)} seconds",
-            f"Sample Count: {sample_count} samples at {EXPORT_SAMPLE_RATE} Hz",
-            "Files: 44.1 kHz / 16-bit stereo WAV, same start point, exact same sample length.",
-            "Ableton: set the project tempo to the BPM above and turn Warp OFF for all imported stem WAV files.",
-        ]
-        archive.writestr("tempo-info.txt", "\n".join(info) + "\n")
-
-    return FileResponse(
-        output,
-        media_type="application/zip",
-        filename=safe_download_name(state.original_filename, "-stems.zip"),
-        background=BackgroundTask(cleanup_export_path, output),
-    )
+async def export_stems(
+    job_id: str,
+    stem: Annotated[list[str] | None, Query()] = None,
+    mode: Literal["mix", "zip", "single"] = "mix",
+    format: AudioFormat | None = None,
+) -> FileResponse:
+    if mode != "zip" and not stem:
+        raise HTTPException(400, "내보낼 파트를 하나 이상 선택하세요.")
+    selected = list(dict.fromkeys(stem or STEMS))
+    if any(name not in STEMS for name in selected):
+        raise HTTPException(400, "알 수 없는 스템 이름입니다.")
+    if mode == "single" and len(selected) != 1:
+        raise HTTPException(400, "개별 다운로드에는 파트를 하나만 선택하세요.")
+    suffix = selected[0] if mode == "single" else "stems" if mode == "zip" else "selected-stems"
+    return await stem_download(job_id, mode, format or ("m4a" if mode == "mix" else "wav"), suffix, selected)
 
 
 @app.get("/api/jobs/{job_id}", response_model=JobResponse)
@@ -447,14 +475,22 @@ async def get_job(job_id: str) -> JobResponse:
 
 @app.delete("/api/jobs/{job_id}", status_code=204)
 async def delete_job(job_id: str) -> None:
-    await store.delete(job_id)
+    async with export_lock:
+        await store.delete(job_id)
 
 
 @app.post("/api/jobs/{job_id}/delete", status_code=204)
 async def post_delete_job(job_id: str) -> None:
-    await store.delete(job_id)
+    await delete_job(job_id)
 
 
 @app.post("/api/jobs/delete/{job_id}", status_code=204)
 async def post_delete_job_alt(job_id: str) -> None:
-    await store.delete(job_id)
+    await delete_job(job_id)
+
+
+# In browser development Vite serves the UI.  The macOS app instead provides a
+# built Vite directory here, so one local server can serve both the UI and API.
+_frontend_dir = os.getenv("MUSIC_FRONTEND_DIR")
+if _frontend_dir and (Path(_frontend_dir) / "index.html").is_file():
+    app.mount("/", StaticFiles(directory=_frontend_dir, html=True), name="frontend")

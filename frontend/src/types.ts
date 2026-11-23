@@ -1,3 +1,8 @@
+export type SeparationEngine = "torch" | "mps" | "mlx";
+export type SeparationQuality = "standard" | "high";
+export type SeparationStatus = "pending" | "running" | "succeeded" | "failed" | "unverified";
+export type AudioFormat = "wav" | "flac" | "m4a";
+
 export type JobStatus = "queued" | "running" | "done" | "error";
 
 export interface JobResponse {
@@ -10,6 +15,11 @@ export interface JobResponse {
   original_filename: string;
   warnings: string[];
   error?: string | null;
+  separation_quality?: SeparationQuality;
+  separation_status?: SeparationStatus;
+  separation_error?: string | null;
+  actual_separation_engine?: SeparationEngine | null;
+  separation_cache_hit?: boolean;
 }
 
 export interface Beat {
@@ -44,8 +54,14 @@ export interface Analysis {
   beats: Beat[];
   chords: Chord[];
   stems: StemAsset[];
+  music_analysis?: boolean;
   warnings: string[];
   generated_at: string;
+  separation_status?: SeparationStatus;
+  separation_error?: string | null;
+  actual_separation_engine?: SeparationEngine | null;
+  separation_cache_hit?: boolean;
+  stem_audio?: { frames: number; sample_rate: number; channels: number; bit_depth: number } | null;
 }
 
 export interface TrackState {

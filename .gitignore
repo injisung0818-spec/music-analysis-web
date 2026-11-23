@@ -1,5 +1,6 @@
 backend/.venv/
 backend/.venv311/
+backend/.venv-mlx/
 backend/storage/
 frontend/node_modules/
 frontend/dist/
