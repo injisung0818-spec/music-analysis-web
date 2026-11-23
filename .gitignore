@@ -10,3 +10,5 @@ frontend/*.tsbuildinfo
 .DS_Store
 *.pyc
 __pycache__/
+backend/rust/target/
+backend/.hybrid-bin/

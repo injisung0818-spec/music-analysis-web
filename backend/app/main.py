@@ -25,7 +25,7 @@ from . import exports
 from .exports import AudioFormat
 from .processor import (
     STEMS, JobState, MusicProcessor, SeparationQuality, SeparationStatus,
-    cleanup_failed_artifacts, demucs_installed, env_flag, find_executable, now_iso,
+    cleanup_failed_artifacts, demucs_installed, env_flag, find_executable, now_iso, read_cached_music,
 )
 
 from .separation import Engine, MODEL as DEMUCS_MODEL, default_engine
@@ -63,6 +63,8 @@ class JobResponse(BaseModel):
     separation_cache_hit: bool = False
     music_analysis: bool = True
     midi: bool = True
+    timings: dict[str, float] = {}
+    music_cache_hit: bool = False
 
 
 class JobStore:
@@ -186,6 +188,15 @@ class JobStore:
                     return True
         return False
 
+    async def load_cached_music(self, key: str) -> dict | None:
+        async with self.lock:
+            for job in reversed(self.jobs.values()):
+                if job.status == "done" and job.music_cache_key == key:
+                    result = read_cached_music(JOBS_DIR / job.id)
+                    if result is not None:
+                        return result
+        return None
+
     def _write_state(self, state: JobState) -> None:
         path = JOBS_DIR / state.id / "job.json"
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -207,7 +218,7 @@ class JobStore:
 
 
 store = JobStore()
-processor = MusicProcessor(store.update, store.link_cached_stems)
+processor = MusicProcessor(store.update, store.link_cached_stems, store.load_cached_music)
 
 
 def configured_cors_origins() -> list[str]:
@@ -253,6 +264,22 @@ async def worker() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    if os.name == "nt":
+        async with run_server():
+            yield
+        return
+
+    import fcntl
+
+    STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+    with (STORAGE_DIR / ".server.lock").open("a") as storage_lock:
+        fcntl.flock(storage_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        async with run_server():
+            yield
+
+
+@asynccontextmanager
+async def run_server():
     for directory in (UPLOADS_DIR, JOBS_DIR):
         directory.mkdir(parents=True, exist_ok=True)
     shutil.rmtree(EXPORTS_DIR, ignore_errors=True)
@@ -293,7 +320,7 @@ else:
 
 
 def public_job(state: JobState) -> JobResponse:
-    return JobResponse(**state.model_dump(exclude={"source_path", "job_dir", "audio_digest", "separation_cache_key"}))
+    return JobResponse(**state.model_dump(exclude={"source_path", "job_dir", "audio_digest", "separation_cache_key", "music_cache_key"}))
 
 
 def safe_download_name(name: str, suffix: str) -> str:

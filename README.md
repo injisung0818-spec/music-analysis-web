@@ -35,9 +35,10 @@
 
 ```text
 MP3/WAV 업로드
-  → WAV 변환 (ffmpeg)
-  → 6-스템 분리 (Demucs)
-  → BPM · 키 · 코드 · 파형 분석 (librosa)
+  → 업로드 검증 · 작업 대기열 (Go 또는 FastAPI)
+  → WAV 변환 (FFmpeg)
+  → 6-스템 분리 (Demucs MLX · PyTorch MPS · CPU)
+  → BPM · 키 · 코드 분석 (librosa) 및 스템 파형 계산 (Rust 또는 Python)
   → MIDI 추출 (Basic Pitch)
   → PCM WAV 저장 · 브라우저에서 재생/내보내기
 ```
@@ -138,6 +139,36 @@ backend/storage/jobs/<job_id>/
 
 분리와 분석 품질은 원본 믹스, 설치된 모델과 도구, 컴퓨팅 자원에 따라 달라집니다. 코드·키 추정과 자동 MIDI는 창작/편곡의 출발점으로 확인하고, 상업적·정밀 작업 전에는 귀로 검토하세요.
 
+## 하이브리드 백엔드 실행
+
+```bash
+brew install go rust
+MUSIC_BACKEND=hybrid ./start.command
+```
+
+Go 1.24 이상과 Rust가 있으면 실행 스크립트가 두 바이너리를 빌드합니다. 이미 빌드한 바이너리도 사용할 수 있습니다. 기본 실행 모드는 사용 가능한 하이브리드 백엔드를 선택하고, 준비가 되지 않은 경우 기존 FastAPI로 실행합니다. `MUSIC_BACKEND=python ./start.command`로 FastAPI를 직접 선택할 수 있습니다. 브라우저 주소는 [localhost:8282](http://localhost:8282/)입니다. 기존 백엔드가 8000번 포트에서 실행 중이면 종료한 뒤 모드를 변경하세요.
+
+| 위치 | 역할 |
+| --- | --- |
+| `backend/go` | 공개 HTTP API, 스트리밍 업로드, 제한된 작업 큐, 중복 감지, 캐시 목록, 취소·삭제, 오디오 범위 전송, DAW용 WAV ZIP |
+| `backend/rust` | PCM WAV 읽기와 스템별 파형 피크 계산 |
+| `backend/app/hybrid_worker.py` | 전용 Unix 소켓에서 처리 요청을 받는 Python 워커 |
+| `backend/app/processor.py`, `separation.py`, `mlx_stems.py` | 디코딩, Demucs MLX·MPS·CPU, librosa BPM·키·코드, Basic Pitch |
+| `backend/app/exports.py` | FFmpeg 믹스와 포맷 변환, 이전 형식·FLAC·M4A ZIP |
+| `backend/app/main.py` | 기존 FastAPI 실행 모드와 공유 내보내기 API |
+
+Go와 Python은 같은 저장소의 `job.json`과 결과 파일을 사용합니다. Unix 소켓의 처리 요청에는 작업 ID와 캐시 목록이 전달됩니다. Rust는 WAV 경로를 인자로 받고 파형 피크만 JSON으로 돌려줍니다. 별도 프로세스의 실행 비용을 포함해 Rust 파형 시간이 줄었고, Python과 피크 값이 동일해 이 방식을 채택했습니다. 스템 PCM은 언어 간 메시지에 들어가지 않습니다.
+
+저장소에는 한 번에 서버 하나만 연결할 수 있습니다. Go는 기본 작업자 1개를 사용하며 `MUSIC_JOB_WORKERS`와 `MUSIC_MAX_PENDING_JOBS`로 한도를 조정할 수 있습니다. 16GB 시스템에서 긴 곡을 동시에 여러 개 분리할 때의 메모리 피크는 별도 측정이 필요합니다. 실행 중 파일 삭제는 409를 반환합니다. Go에서 작업을 취소하려면 다음 API를 사용합니다. 대기 작업은 즉시 취소되며, 실행 중 작업은 추론·DSP 프로세스 정리 또는 Python 분석 단계의 종료 후 상태가 갱신됩니다.
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/jobs/JOB_ID/cancel
+```
+
+스템 캐시와 BPM·키·코드 캐시는 별개입니다. 입력과 분석 라이브러리 버전이 같다면 분리 엔진이나 품질을 바꾸어도 저장된 음악 분석을 재사용할 수 있습니다. 이전 결과는 계속 조회할 수 있습니다. 새 음악 분석 캐시 키는 이 버전에서 처리한 작업부터 기록됩니다. Basic Pitch는 작업당 모델을 한 번 준비해 여섯 스템에 사용합니다.
+
+`MUSIC_PARALLEL_ANALYSIS=long`은 120초 이상에서 원본 음악 분석과 스템 분리를 겹쳐 실행합니다. 짧은 곡은 두 단계가 자원을 서로 경쟁해 더 느려진 사례가 있어 순차 실행합니다. `0`으로 순차 실행을 강제하고 `1`로 모든 길이에 병렬 실행을 선택할 수 있습니다. 기존 Docker·Render 구성은 FastAPI를 계속 사용합니다.
+
 ## Apple Silicon 가속
 
 업로드 창의 분리 엔진에서 **PyTorch MPS** 또는 **Fast · MLX**를 선택할 수 있습니다. 서버 기본값은 기존 PyTorch 경로입니다. Standard와 High Quality는 어느 엔진에서도 같은 shifts와 overlap 설정을 사용합니다. 가속 엔진을 실행하거나 결과를 검증하는 데 실패하면, 오류를 표시하고 같은 품질 설정으로 PyTorch CPU에서 다시 시도합니다.
@@ -179,6 +210,8 @@ backend/.venv-mlx/bin/python -m pip install 'demucs-mlx==1.6.1'
 
 MLX의 스템 전용 작업은 2.81초, 재사용한 스템 전용 API 요청은 0.32초였습니다. 180초 음원은 MLX에서 7.03초, 최대 6.56 GiB로 분리했습니다. 가속 모델은 작업마다 별도 프로세스에서 불러오고 종료 시 해제합니다. 모델 최초 다운로드 속도, 실제 Suno 음원의 청감 품질, 최대 길이 20분의 메모리 사용량은 미검증입니다.
 
+하이브리드 전환 후의 60초·180초 비교와 API 처리량은 [백엔드 벤치마크](backend/README.md#hybrid-release-validation)를 참고하세요.
+
 ## 환경 변수
 
 | 이름                 | 기본값            | 설명                                                                                                                       |
@@ -194,6 +227,8 @@ MLX의 스템 전용 작업은 2.81초, 재사용한 스템 전용 API 요청은
 | `MUSIC_DEMUCS_REPO` | 모델 기본 캐시 | 이미 준비한 Demucs 모델 저장소 경로 |
 | `MUSIC_DEMUCS_TIMEOUT_SECONDS` | `3600` | 모델 준비와 분리의 최대 실행 시간 |
 | `MUSIC_MAX_UPLOAD_MB` / `MUSIC_MAX_DURATION_SECONDS` | `150` / `1200` | 업로드 최대 크기와 오디오 최대 길이 |
+| `MUSIC_BACKEND` | `auto` | 로컬 실행 모드. `auto`, `hybrid`, `python` |
+| `MUSIC_JOB_WORKERS` | `1` | Go 백엔드에서 동시에 실행하는 작업 수 |
 | `MUSIC_MAX_PENDING_JOBS` | `8` | 실행 중인 작업을 포함한 최대 대기열 크기 |
 | `MUSIC_APP_DATA_DIR` | `backend/storage` | 업로드 파일과 작업 결과를 저장할 디렉터리입니다.                                                                           |
 | `CORS_ORIGINS`       | localhost만 허용  | 쉼표로 구분한 배포 프론트엔드 origin입니다. 예: `https://example.netlify.app`.                                             |
@@ -218,6 +253,7 @@ MUSIC_FAST_UPLOAD=0 uvicorn app.main:app --reload --port 8000
 | `GET`    | `/api/jobs/{job_id}/export/mix`          | 전체 스템 믹스 내보내기. `format=wav\|flac\|m4a`                                  |
 | `GET`    | `/api/jobs/{job_id}/export/stems`        | 반복 `stem` 파라미터, `mode=mix\|single\|zip`, `format=wav\|flac\|m4a`. ZIP에서 스템을 생략하면 전체 내보내기               |
 | `GET` | `/api/jobs/{job_id}/export/instrumental` | 보컬을 제외한 5개 스템 믹스. 기본 형식은 WAV |
+| `POST` | `/api/jobs/{job_id}/cancel` | Go 백엔드에서 대기 또는 실행 중인 작업 취소 |
 | `DELETE` | `/api/jobs/{job_id}`                     | 작업 결과와 업로드 원본 삭제                             |
 
 ## 배포
@@ -234,13 +270,16 @@ VITE_API_BASE=https://your-backend-domain.onrender.com
 
 기본 Render 설정은 BPM·키·코드 분석을 제공하고 Demucs는 비활성화합니다. 업로드 한도는 40MB·5분이며, 실행 중 및 대기 중인 작업을 합해 최대 2개를 받습니다. 분리가 필요한 자체 Docker 환경에서는 `--build-arg INSTALL_AUDIO_MODELS=1`로 이미지를 빌드하고 `MUSIC_ENABLE_DEMUCS=1`로 실행하세요. 모델 캐시와 `/app/storage`의 영구 디스크를 지정하고, 해당 환경에서 처리 시간과 메모리 사용량을 측정하세요.
 
-API는 단일 Uvicorn 프로세스에서 분석 작업을 하나씩 처리합니다. 기다리는 작업은 삭제로 취소할 수 있고, 실행 중인 작업을 삭제하면 409를 반환합니다. 서버 재시작으로 작업이 중단되면 작업 화면에 표시됩니다.
+Render의 FastAPI는 단일 Uvicorn 프로세스에서 분석 작업을 하나씩 처리합니다. 기다리는 작업은 삭제로 취소할 수 있고, 실행 중인 작업을 삭제하면 409를 반환합니다. 서버 재시작으로 작업이 중단되면 작업 화면에 표시됩니다.
 
 ## 프로젝트 구조
 
 ```text
 backend/
-├── app/main.py             # FastAPI API, 업로드, 작업 큐, 에셋/내보내기 API
+├── go/                     # Go API, 작업 큐, 캐시, 파일 제공과 WAV ZIP
+├── rust/                   # WAV 파형 DSP
+├── app/hybrid_worker.py    # Go 백엔드의 Python 추론 워커
+├── app/main.py             # FastAPI 모드 및 공유 API
 ├── app/processor.py        # 변환·분리·분석·MIDI 파이프라인
 ├── app/exports.py          # 믹스·개별 스템·ZIP 내보내기
 ├── requirements.txt        # 필수 Python 의존성
@@ -263,7 +302,7 @@ netlify.toml                # Netlify 빌드·SPA 라우팅 설정
 
 ## 라이선스
 
-이 프로젝트는 [MIT License](LICENSE)로 배포됩니다. 자세한 조건은 [LICENSE](LICENSE) 파일을 확인하세요.
+이 프로젝트의 코드는 [PolyForm Noncommercial License 1.0.0](LICENSE)으로 제공됩니다. 개인 학습·연구·취미 등 비상업적 목적으로 코드를 내려받고, 사용·분석·수정·공유할 수 있습니다. 상업적 사용은 별도 허가 없이 허용되지 않습니다. 이 라이선스에서는 소스 코드를 열람할 수 있습니다. 이전 MIT 배포본의 저작권 및 허가 고지는 [LICENSE-LEGACY-MIT](LICENSE-LEGACY-MIT)에 보존되어 있습니다. 의존성, 모델 가중치, 기타 제3자 자료에는 각각의 라이선스가 적용됩니다.
 
 ---
 
@@ -277,7 +316,8 @@ Local Music Analysis MVP is a local-first, Moises Studio–style music workspace
 
 ### Highlights
 
-- Six-stem separation: vocals, drums, bass, guitar, piano, and other (with Demucs installed)
+- Six-stem separation with Demucs via Apple MLX, PyTorch MPS, or CPU
+- Local Go API and Rust waveform processing with shared Python inference and a standalone FastAPI mode
 - BPM, beat grid, key/mode, chroma-based chord timeline, and waveform analysis (with librosa installed)
 - Per-stem mute, solo, volume, pan, playback controls, metronome, and local library metadata
 - MIDI extraction with Basic Pitch, or fast placeholder MIDI by default
@@ -293,7 +333,9 @@ Requirements: Python 3.11 recommended, Node.js 18+, npm, and optionally `ffmpeg`
 ./start.command
 ```
 
-Or start the services separately:
+For the hybrid backend, install Go 1.24 or later and Rust, then run `MUSIC_BACKEND=hybrid ./start.command`. To select FastAPI explicitly, run `MUSIC_BACKEND=python ./start.command`.
+
+You can also start FastAPI and the frontend in separate terminals.
 
 ```bash
 cd backend
@@ -319,4 +361,4 @@ See the Korean documentation above for output layout, environment variables, API
 
 ### License
 
-Released under the [MIT License](LICENSE).
+The project's code is available under the [PolyForm Noncommercial License 1.0.0](LICENSE). You may download, use, study, modify, and share it for noncommercial purposes. Commercial use requires separate permission. The copyright and permission notices for earlier MIT distributions are preserved in [LICENSE-LEGACY-MIT](LICENSE-LEGACY-MIT). Dependencies, model weights, and other third-party materials remain subject to their own licenses.

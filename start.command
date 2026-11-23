@@ -158,18 +158,74 @@ if [ ! -d "$FRONTEND_DIR/node_modules" ]; then
   npm --prefix "$FRONTEND_DIR" ci
 fi
 
+BACKEND_MODE="${MUSIC_BACKEND:-auto}"
+HYBRID_BIN="$BACKEND_DIR/.hybrid-bin"
+case "$BACKEND_MODE" in
+  auto|python|hybrid) ;;
+  *) echo "Use MUSIC_BACKEND=auto, python, or hybrid."; exit 1 ;;
+esac
+
+build_hybrid() {
+  command -v go >/dev/null 2>&1 && command -v cargo >/dev/null 2>&1 || return 1
+  mkdir -p "$HYBRID_BIN" || return 1
+  local stage
+  stage="$(mktemp -d "$HYBRID_BIN/build.XXXXXX")" || return 1
+  if (cd "$BACKEND_DIR/go" && go build -o "$stage/music-api" .) \
+      && cargo build --release --locked --manifest-path "$BACKEND_DIR/rust/Cargo.toml" \
+      && cp "$BACKEND_DIR/rust/target/release/music-dsp" "$stage/music-dsp"; then
+    mv "$stage/music-api" "$stage/music-dsp" "$HYBRID_BIN/"
+    rmdir "$stage"
+    return 0
+  fi
+  rm -rf "$stage"
+  return 1
+}
+
+USE_HYBRID=0
+if ! port_is_open "$BACKEND_PORT" && [ "$BACKEND_MODE" != python ]; then
+  if command -v go >/dev/null 2>&1 && command -v cargo >/dev/null 2>&1; then
+    if build_hybrid; then USE_HYBRID=1; fi
+  elif [ -x "$HYBRID_BIN/music-api" ] && [ -x "$HYBRID_BIN/music-dsp" ]; then
+    USE_HYBRID=1
+  fi
+  if [ "$USE_HYBRID" -eq 0 ]; then
+    echo "To build the hybrid backend, install Go 1.24+ and Rust (brew install go rust)."
+    if [ "$BACKEND_MODE" = hybrid ]; then exit 1; fi
+  fi
+fi
+
+if port_is_open "$BACKEND_PORT" && [ "$BACKEND_MODE" != auto ]; then
+  running_mode=python
+  if curl -fsS -D - -o /dev/null "http://127.0.0.1:$BACKEND_PORT/api/health" | grep -qi '^X-Music-Backend: go'; then
+    running_mode=hybrid
+  fi
+  if [ "$running_mode" != "$BACKEND_MODE" ]; then
+    echo "The $running_mode backend is already running. Stop it before selecting $BACKEND_MODE."
+    exit 1
+  fi
+fi
+
 STARTED_PIDS=()
 cleanup() {
   for pid in "${STARTED_PIDS[@]}"; do
     kill "$pid" >/dev/null 2>&1 || true
   done
 }
-trap cleanup INT TERM EXIT
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 if ! port_is_open "$BACKEND_PORT"; then
   echo "Starting backend on http://127.0.0.1:$BACKEND_PORT"
   cd "$BACKEND_DIR"
-  "$BACKEND_VENV/bin/uvicorn" app.main:app --reload --port "$BACKEND_PORT" > "$BACKEND_LOG" 2>&1 &
+  if [ "$USE_HYBRID" -eq 1 ]; then
+    echo "Using Go API, Rust DSP, and Python AI worker"
+    MUSIC_RUST_DSP="$HYBRID_BIN/music-dsp" MUSIC_PARALLEL_ANALYSIS="${MUSIC_PARALLEL_ANALYSIS:-long}" \
+      "$HYBRID_BIN/music-api" -backend "$BACKEND_DIR" -python "$BACKEND_VENV/bin/python" \
+      -listen "127.0.0.1:$BACKEND_PORT" > "$BACKEND_LOG" 2>&1 &
+  else
+    "$BACKEND_VENV/bin/uvicorn" app.main:app --reload --port "$BACKEND_PORT" > "$BACKEND_LOG" 2>&1 &
+  fi
   STARTED_PIDS+=($!)
   cd "$ROOT_DIR"
 else

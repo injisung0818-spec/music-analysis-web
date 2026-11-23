@@ -13,7 +13,10 @@ from collections import deque
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from datetime import datetime, timezone
+from functools import lru_cache
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
+from time import perf_counter
 from typing import Literal, TypeVar
 
 import soundfile
@@ -76,8 +79,11 @@ class JobState(BaseModel):
     separation_cache_hit: bool = False
     audio_digest: str | None = None
     separation_cache_key: str | None = None
+    music_cache_key: str | None = None
+    music_cache_hit: bool = False
     music_analysis: bool = True
     midi: bool = True
+    timings: dict[str, float] = {}
 
 
 class MusicProcessor:
@@ -85,13 +91,16 @@ class MusicProcessor:
         self,
         update_job: Callable[[JobState], Awaitable[None]],
         link_cached_stems: Callable[[str, Path], Awaitable[bool]] | None = None,
+        load_cached_music: Callable[[str], Awaitable[dict | None]] | None = None,
     ) -> None:
         self.update_job = update_job
         self.link_cached_stems = link_cached_stems
+        self.load_cached_music = load_cached_music
 
     async def process(self, state: JobState) -> None:
         job_dir = Path(state.job_dir)
         source = Path(state.source_path)
+        music_task = None
         try:
             await self._set(state, "running", 0.03, "오디오 준비 중")
             audio_wav = job_dir / "source.wav"
@@ -99,7 +108,12 @@ class MusicProcessor:
             midi_dir = job_dir / "midi"
             stems_dir.mkdir(exist_ok=True)
 
+            started = perf_counter()
             converted = await self._prepare_audio(source, audio_wav)
+            state.timings["decode"] = perf_counter() - started
+            digest = state.audio_digest
+            if digest and converted != source and (self.link_cached_stems or self.load_cached_music):
+                digest = await asyncio.to_thread(file_digest, converted)
             if converted != source:
                 remove_upload_source(source)
 
@@ -107,8 +121,16 @@ class MusicProcessor:
             await self._set(state, "running", 0.16, "Demucs 및 htdemucs_6s 모델 준비 중")
             stem_paths: dict[str, Path] = {}
             stem_audio = None
+            music_key = music_cache_key(digest) if state.music_analysis and digest and self.load_cached_music else None
+            cached_music = await self.load_cached_music(music_key) if music_key and self.load_cached_music else None
+            parallel = os.getenv("MUSIC_PARALLEL_ANALYSIS") == "long" and soundfile.info(converted).duration >= 120
+            if state.music_analysis and cached_music is None and (parallel or (
+                os.getenv("MUSIC_PARALLEL_ANALYSIS") != "long" and env_flag("MUSIC_PARALLEL_ANALYSIS")
+            )):
+                music_task = asyncio.create_task(finish_thread_on_cancel(self._analyze_music, converted))
+            started = perf_counter()
             try:
-                stem_paths, stem_audio = await self._separate_stems(converted, stems_dir, state)
+                stem_paths, stem_audio = await self._separate_stems(converted, stems_dir, state, digest)
             except (RuntimeError, OSError) as exc:
                 state.separation_status = "failed"
                 state.separation_error = str(exc)
@@ -117,17 +139,39 @@ class MusicProcessor:
                     raise
             else:
                 state.separation_status = "succeeded"
+            state.timings["separation"] = perf_counter() - started
             message = "템포, 키, 코드 분석 중" if state.music_analysis else "스템 파형 생성 중"
             await self._set(state, "running", 0.55, message)
 
-            analysis = await finish_thread_on_cancel(self._analyze_audio, converted, stem_paths, state)
+            if state.music_analysis and music_task is None and cached_music is None:
+                music_task = asyncio.create_task(finish_thread_on_cancel(self._analyze_music, converted))
+            started = perf_counter()
+            waveforms = await self._waveforms(stem_paths, state)
+            state.timings["waveforms"] = perf_counter() - started
+            if cached_music is not None:
+                analysis = cached_music
+                state.music_cache_hit = True
+                state.music_cache_key = music_key
+            elif music_task is not None:
+                analysis, timings, warning = await music_task
+                state.timings.update(timings)
+                if warning:
+                    state.warnings.append(warning)
+                else:
+                    state.music_cache_key = music_key
+            else:
+                analysis = {"duration": round(soundfile.info(converted).duration, 3),
+                            "bpm": 0, "key": "", "mode": "", "beats": [], "chords": []}
             midi_paths = {}
             if stem_paths and state.midi:
                 midi_dir.mkdir(exist_ok=True)
                 await self._set(state, "running", 0.76, "MIDI 추출 중")
+                started = perf_counter()
                 midi_paths = await self._extract_midi(stem_paths, midi_dir, state)
+                state.timings["midi"] = perf_counter() - started
             await self._set(state, "running", 0.92, "결과 저장 중")
 
+            started = perf_counter()
             stem_assets = []
             for stem in STEMS:
                 stem_path = stem_paths.get(stem)
@@ -138,7 +182,7 @@ class MusicProcessor:
                         "color": STEM_COLORS[stem],
                         "audio_url": f"/api/jobs/{state.id}/assets/{stem_path.relative_to(job_dir)}" if stem_path else None,
                         "midi_url": f"/api/jobs/{state.id}/assets/{midi_path.relative_to(job_dir)}" if midi_path else None,
-                        "waveform": analysis["waveforms"].get(stem, []),
+                        "waveform": waveforms.get(stem, []),
                     }
                 )
 
@@ -158,17 +202,20 @@ class MusicProcessor:
                 "actual_separation_engine": state.actual_separation_engine,
                 "separation_cache_hit": state.separation_cache_hit,
                 "music_analysis": state.music_analysis,
+                "music_cache_hit": state.music_cache_hit,
                 "midi_requested": state.midi,
                 "separation_status": state.separation_status,
                 "separation_error": state.separation_error,
                 "warnings": state.warnings,
                 "generated_at": now_iso(),
+                "timings": state.timings,
             }
             audio_wav.unlink(missing_ok=True)
             remove_upload_source(source)
             temporary = job_dir / "analysis.json.tmp"
             temporary.write_text(json.dumps(result, separators=(",", ":")), encoding="utf-8")
             temporary.replace(job_dir / "analysis.json")
+            state.timings["result_write"] = perf_counter() - started
             if stem_paths:
                 message = "6개 스템 분리 완료"
             elif state.music_analysis:
@@ -177,9 +224,11 @@ class MusicProcessor:
                 message = "스템 분리 실패"
             await self._set(state, "done", 1.0, message)
         except asyncio.CancelledError:
+            await stop_analysis(music_task)
             cleanup_failed_artifacts(job_dir, source)
             raise
         except Exception as exc:
+            await stop_analysis(music_task)
             cleanup_failed_artifacts(job_dir, source)
             state.error = str(exc)
             if state.separation_status in {"pending", "running", "succeeded"}:
@@ -217,14 +266,11 @@ class MusicProcessor:
         return target
 
     async def _separate_stems(
-        self, audio_wav: Path, stems_dir: Path, state: JobState
+        self, audio_wav: Path, stems_dir: Path, state: JobState, input_digest: str | None = None
     ) -> tuple[dict[str, Path], dict[str, int]]:
         if not env_flag("MUSIC_ENABLE_DEMUCS", True):
             raise RuntimeError("이 서버에서는 Demucs 스템 분리가 비활성화되어 있습니다.")
         requested = state.separation_engine
-        input_digest = state.audio_digest if self.link_cached_stems else None
-        if input_digest and audio_wav != Path(state.source_path):
-            input_digest = await asyncio.to_thread(file_digest, audio_wav)
         try:
             plan = SeparationPlan.build(requested)
         except RuntimeError as exc:
@@ -278,16 +324,22 @@ class MusicProcessor:
                 return published, metadata
 
         cmd, model_dir, env = plan.command(audio_wav, out_dir, shifts, overlap)
+        inference_start = None
+        launch = perf_counter()
         started = False
         completed_passes = 0
         previous_percent = 0
 
         async def report(line: str) -> None:
-            nonlocal started, completed_passes, previous_percent
+            nonlocal started, completed_passes, previous_percent, inference_start
             if line.startswith("Separating track"):
                 started = True
+                inference_start = perf_counter()
+                state.timings["model_startup"] = inference_start - launch
                 await self._set(state, "running", 0.18, "htdemucs_6s 스템 분리 중")
             elif line == "Writing stems":
+                if inference_start is not None:
+                    state.timings["inference"] = perf_counter() - inference_start
                 await self._set(state, "running", 0.51, "스템 WAV 저장 중")
             elif started and (match := re.search(r"(\d+)%\|", line)):
                 percent = int(match[1])
@@ -355,22 +407,48 @@ class MusicProcessor:
             detail = "\n".join(details)[-1200:] or f"종료 코드 {process.returncode}"
             raise RuntimeError(f"{error_message} · {detail}")
 
-    def _analyze_audio(self, audio_wav: Path, stem_paths: dict[str, Path], state: JobState) -> dict:
-        waveforms = {stem: waveform_peaks(path) for stem, path in stem_paths.items()}
-        if not state.music_analysis:
-            return {
-                "duration": round(soundfile.info(audio_wav).duration, 3),
-                "bpm": 0, "key": "", "mode": "", "beats": [], "chords": [], "waveforms": waveforms,
-            }
+    async def _waveforms(self, paths: dict[str, Path], state: JobState) -> dict:
+        binary = os.getenv("MUSIC_RUST_DSP")
+        if binary and paths:
+            try:
+                # The child sees only paths. Its stdout is bounded by six 2400-point envelopes.
+                process = await asyncio.create_subprocess_exec(
+                    binary, *(str(path) for path in paths.values()),
+                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                )
+                try:
+                    stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=60)
+                finally:
+                    if process.returncode is None:
+                        with suppress(ProcessLookupError):
+                            process.kill()
+                        await process.wait()
+                if process.returncode:
+                    raise RuntimeError(stderr.decode(errors="replace").strip()[:300])
+                envelopes = json.loads(stdout)
+                if len(envelopes) != len(paths) or any(not 0 < len(peaks) <= 2400 for peaks in envelopes):
+                    raise ValueError("잘못된 파형 길이")
+                return {stem: [round(peak, 4) for peak in peaks] for stem, peaks in zip(paths, envelopes)}
+            except (OSError, RuntimeError, ValueError, TimeoutError) as exc:
+                state.warnings.append(f"Rust 파형 처리 실패 · Python으로 재시도 · {exc}")
+        return await finish_thread_on_cancel(lambda: {stem: waveform_peaks(path) for stem, path in paths.items()})
+
+    def _analyze_music(self, audio_wav: Path) -> tuple[dict, dict, str | None]:
+        timings = {}
+        started = perf_counter()
         try:
             import librosa
             import numpy as np
 
             y, sr = librosa.load(audio_wav, sr=ANALYSIS_SAMPLE_RATE, mono=True)
             duration = float(librosa.get_duration(y=y, sr=sr))
+            timings["analysis_decode"] = perf_counter() - started
+            started = perf_counter()
             tempo, beat_frames = librosa.beat.beat_track(y=y, sr=sr, units="frames")
             tempo_value = float(np.asarray(tempo).reshape(-1)[0]) if np.asarray(tempo).size else 120.0
             beat_times = librosa.frames_to_time(beat_frames, sr=sr).tolist()
+            timings["bpm"] = perf_counter() - started
+            started = perf_counter()
             try:
                 harmonic = librosa.effects.harmonic(y)
                 chroma = librosa.feature.chroma_cqt(
@@ -382,8 +460,13 @@ class MusicProcessor:
             except Exception:
                 chroma = librosa.feature.chroma_stft(y=y, sr=sr, hop_length=CHROMA_HOP_LENGTH, n_fft=4096)
             chroma = normalize_chroma(chroma)
+            timings["chroma"] = perf_counter() - started
+            started = perf_counter()
             key, mode = estimate_key(chroma)
+            timings["key"] = perf_counter() - started
+            started = perf_counter()
             chords = estimate_chords(chroma, sr, librosa, duration, CHROMA_HOP_LENGTH, beat_times)
+            timings["chords"] = perf_counter() - started
             return {
                 "duration": round(duration, 3),
                 "bpm": round(tempo_value, 2),
@@ -391,10 +474,9 @@ class MusicProcessor:
                 "mode": mode,
                 "beats": [{"time": round(float(t), 3), "index": i + 1} for i, t in enumerate(beat_times[:500])],
                 "chords": chords,
-                "waveforms": waveforms,
-            }
+            }, timings, None
         except Exception as exc:
-            state.warnings.append(f"librosa가 설치되어 있지 않거나 분석에 실패해 임시 BPM/key/chord 분석 결과를 생성했습니다. 상세: {exc}")
+            warning = f"librosa가 설치되어 있지 않거나 분석에 실패해 임시 BPM/key/chord 분석 결과를 생성했습니다. 상세: {exc}"
             duration = soundfile.info(audio_wav).duration
             bpm = 120.0
             beat_step = 60.0 / bpm
@@ -407,8 +489,7 @@ class MusicProcessor:
                 "mode": "major",
                 "beats": beats,
                 "chords": chords,
-                "waveforms": waveforms,
-            }
+            }, timings, warning
 
     async def _extract_midi(self, stem_paths: dict[str, Path], midi_dir: Path, state: JobState) -> dict[str, Path]:
         if env_flag("MUSIC_FAST_UPLOAD", True):
@@ -417,8 +498,9 @@ class MusicProcessor:
 
         try:
             from basic_pitch import ICASSP_2022_MODEL_PATH
-            from basic_pitch.inference import predict_and_save
+            from basic_pitch.inference import Model, predict_and_save
 
+            model = await finish_thread_on_cancel(Model, ICASSP_2022_MODEL_PATH)
             midi_paths = {}
             for stem, path in stem_paths.items():
                 await finish_thread_on_cancel(
@@ -429,7 +511,7 @@ class MusicProcessor:
                     False,
                     False,
                     False,
-                    ICASSP_2022_MODEL_PATH,
+                    model,
                 )
                 generated = midi_dir / f"{path.stem}_basic_pitch.mid"
                 target = midi_dir / f"{stem}.mid"
@@ -442,6 +524,31 @@ class MusicProcessor:
         except Exception as exc:
             state.warnings.append(f"basic-pitch가 설치되어 있지 않거나 MIDI 추출에 실패해 placeholder MIDI 파일을 생성했습니다. 상세: {exc}")
             return write_placeholder_midis(midi_dir)
+
+
+async def stop_analysis(task: asyncio.Task | None) -> None:
+    if task is not None:
+        if not task.done():
+            task.cancel()
+        with suppress(asyncio.CancelledError, Exception):
+            await task
+
+
+def music_cache_key(digest: str) -> str | None:
+    try:
+        versions = tuple(version(name) for name in ("librosa", "numpy", "scipy", "soxr", "soundfile"))
+    except PackageNotFoundError:
+        return None
+    return hashlib.sha256(json.dumps(("music-analysis-v1", digest, versions)).encode()).hexdigest()
+
+
+def read_cached_music(path: Path) -> dict | None:
+    try:
+        analysis = json.loads((path / "analysis.json").read_text())
+        fields = ("duration", "bpm", "key", "mode", "beats", "chords")
+        return {field: analysis[field] for field in fields}
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
 
 
 def file_digest(path: Path) -> str:
@@ -584,7 +691,8 @@ def chord_boundaries(duration: float, beat_times: list[float] | None) -> list[fl
     return boundaries
 
 
-def estimate_chord_label(chroma_vector) -> tuple[str, float]:
+@lru_cache(maxsize=1)
+def chord_templates() -> list[tuple[str, object, float]]:
     import numpy as np
 
     templates = {
@@ -596,20 +704,29 @@ def estimate_chord_label(chroma_vector) -> tuple[str, float]:
         "sus4": [1, 0, 0, 0, 0, 0.72, 0, 0.84, 0, 0, 0, 0],
         "dim": [1, 0, 0, 0.76, 0, 0, 0.72, 0, 0, 0, 0, 0],
     }
-    vector = np.asarray(chroma_vector, dtype=float)
-    norm = np.linalg.norm(vector)
-    if norm <= 1e-9:
-        return "N", 0.0
-    vector = vector / norm
-    best = (-1.0, "N")
+    result = []
     extension_penalty = {"7": 0.07, "m7": 0.07, "maj7": 0.07, "sus4": 0.035, "dim": 0.035}
     for i, name in enumerate(KEY_NAMES):
         for suffix, template in templates.items():
             template_vector = np.roll(np.array(template, dtype=float), i)
             template_vector = template_vector / np.linalg.norm(template_vector)
             label = f"{name}{suffix}"
-            score = float(np.dot(vector, template_vector)) - extension_penalty.get(suffix, 0.0)
-            best = max(best, (score, label), key=lambda item: item[0])
+            result.append((label, template_vector, extension_penalty.get(suffix, 0.0)))
+    return result
+
+
+def estimate_chord_label(chroma_vector) -> tuple[str, float]:
+    import numpy as np
+
+    vector = np.asarray(chroma_vector, dtype=float)
+    norm = np.linalg.norm(vector)
+    if norm <= 1e-9:
+        return "N", 0.0
+    vector = vector / norm
+    best = (-1.0, "N")
+    for label, template, penalty in chord_templates():
+        score = float(np.dot(vector, template)) - penalty
+        best = max(best, (score, label), key=lambda item: item[0])
     confidence = min(1.0, max(0.0, best[0]))
     if confidence < 0.5:
         return "N", confidence
