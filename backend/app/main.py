@@ -172,7 +172,7 @@ class JobStore:
             self.jobs[state.id] = state
             self._write_state(state)
 
-    async def link_cached_stems(self, key: str, destination: Path) -> bool:
+    async def link_cached_stems(self, key: str, destination: Path) -> Path | None:
         async with self.lock:
             for job in reversed(self.jobs.values()):
                 if job.status != "done" or job.separation_status != "succeeded" or job.separation_cache_key != key:
@@ -185,8 +185,8 @@ class JobStore:
                 except OSError:
                     shutil.rmtree(destination, ignore_errors=True)
                 else:
-                    return True
-        return False
+                    return JOBS_DIR / job.id
+        return None
 
     async def load_cached_music(self, key: str) -> dict | None:
         async with self.lock:

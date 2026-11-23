@@ -168,12 +168,17 @@ esac
 build_hybrid() {
   command -v go >/dev/null 2>&1 && command -v cargo >/dev/null 2>&1 || return 1
   mkdir -p "$HYBRID_BIN" || return 1
-  local stage
+  local stage dsp_library
+  case "$(uname -s)" in
+    Darwin) dsp_library=libmusic_dsp.dylib ;;
+    *) dsp_library=libmusic_dsp.so ;;
+  esac
   stage="$(mktemp -d "$HYBRID_BIN/build.XXXXXX")" || return 1
   if (cd "$BACKEND_DIR/go" && go build -o "$stage/music-api" .) \
       && cargo build --release --locked --manifest-path "$BACKEND_DIR/rust/Cargo.toml" \
-      && cp "$BACKEND_DIR/rust/target/release/music-dsp" "$stage/music-dsp"; then
-    mv "$stage/music-api" "$stage/music-dsp" "$HYBRID_BIN/"
+      && cp "$BACKEND_DIR/rust/target/release/music-dsp" \
+        "$BACKEND_DIR/rust/target/release/$dsp_library" "$stage/"; then
+    mv "$stage/music-api" "$stage/music-dsp" "$stage/$dsp_library" "$HYBRID_BIN/"
     rmdir "$stage"
     return 0
   fi

@@ -2,7 +2,7 @@
 
 > 내 음악 파일을 업로드하면 스템 분리, BPM·조성·코드 분석, MIDI 추출과 오디오 내보내기를 한 작업 공간에서 제공하는 로컬 우선 음악 분석 도구입니다.
 
-**한국어** | [English](#english)
+**한국어** | [English](#english) | [사용 약관 / Terms of Use](TERMS.md)
 
 ## 제품 소개
 
@@ -51,7 +51,7 @@ Demucs를 실행할 수 없으면 스템 분리 오류가 표시됩니다. 키·
 
 - macOS, Linux 또는 Windows 환경
 - Python 3.11 (`start.command` 사용 시)
-- Node.js 18 이상 및 npm
+- Node.js 20 이상 및 npm
 - `ffmpeg` 권장 — MP3 변환, 오디오 믹스, FLAC·M4A 내보내기에 사용
 
 ### 가장 쉬운 실행 방법 (macOS)
@@ -143,21 +143,21 @@ backend/storage/jobs/<job_id>/
 
 ```bash
 brew install go rust
-MUSIC_BACKEND=hybrid ./start.command
+MUSIC_BACKEND=hybrid MUSIC_FAST_UPLOAD=0 ./start.command
 ```
 
-Go 1.24 이상과 Rust가 있으면 실행 스크립트가 두 바이너리를 빌드합니다. 이미 빌드한 바이너리도 사용할 수 있습니다. 기본 실행 모드는 사용 가능한 하이브리드 백엔드를 선택하고, 준비가 되지 않은 경우 기존 FastAPI로 실행합니다. `MUSIC_BACKEND=python ./start.command`로 FastAPI를 직접 선택할 수 있습니다. 브라우저 주소는 [localhost:8282](http://localhost:8282/)입니다. 기존 백엔드가 8000번 포트에서 실행 중이면 종료한 뒤 모드를 변경하세요.
+Go 1.24 이상과 Rust가 있으면 실행 스크립트가 Go API, Rust 파형 실행 파일과 Rust DSP 라이브러리를 빌드합니다. 이미 빌드한 파일도 사용할 수 있습니다. 위 명령은 실제 Basic Pitch MIDI 추출을 켭니다. 기본 실행 모드는 사용 가능한 하이브리드 백엔드를 선택하고, 준비가 되지 않은 경우 기존 FastAPI로 실행합니다. `MUSIC_BACKEND=python ./start.command`로 FastAPI를 직접 선택할 수 있습니다. 브라우저 주소는 [localhost:8282](http://localhost:8282/)입니다. 기존 백엔드가 8000번 포트에서 실행 중이면 종료한 뒤 모드를 변경하세요.
 
 | 위치 | 역할 |
 | --- | --- |
 | `backend/go` | 공개 HTTP API, 스트리밍 업로드, 제한된 작업 큐, 중복 감지, 캐시 목록, 취소·삭제, 오디오 범위 전송, DAW용 WAV ZIP |
-| `backend/rust` | PCM WAV 읽기와 스템별 파형 피크 계산 |
+| `backend/rust` | PCM WAV 파형 피크와 Harmonic 필터의 중앙값 계산 |
 | `backend/app/hybrid_worker.py` | 전용 Unix 소켓에서 처리 요청을 받는 Python 워커 |
 | `backend/app/processor.py`, `separation.py`, `mlx_stems.py` | 디코딩, Demucs MLX·MPS·CPU, librosa BPM·키·코드, Basic Pitch |
 | `backend/app/exports.py` | FFmpeg 믹스와 포맷 변환, 이전 형식·FLAC·M4A ZIP |
 | `backend/app/main.py` | 기존 FastAPI 실행 모드와 공유 내보내기 API |
 
-Go와 Python은 같은 저장소의 `job.json`과 결과 파일을 사용합니다. Unix 소켓의 처리 요청에는 작업 ID와 캐시 목록이 전달됩니다. Rust는 WAV 경로를 인자로 받고 파형 피크만 JSON으로 돌려줍니다. 별도 프로세스의 실행 비용을 포함해 Rust 파형 시간이 줄었고, Python과 피크 값이 동일해 이 방식을 채택했습니다. 스템 PCM은 언어 간 메시지에 들어가지 않습니다.
+Go와 Python은 같은 저장소의 `job.json`과 결과 파일을 사용합니다. Unix 소켓의 처리 요청에는 작업 ID와 캐시 목록이 전달됩니다. Rust 파형 실행 파일은 WAV 경로를 받아 피크를 JSON으로 돌려줍니다. Python 분석 워커는 Rust DSP 라이브러리에서 Harmonic 필터의 두 중앙값 계산을 실행합니다. STFT, 마스크, 역변환과 Chroma는 librosa가 처리합니다. Rust 라이브러리를 불러올 수 없으면 librosa가 필터링 전부를 처리합니다.
 
 저장소에는 한 번에 서버 하나만 연결할 수 있습니다. Go는 기본 작업자 1개를 사용하며 `MUSIC_JOB_WORKERS`와 `MUSIC_MAX_PENDING_JOBS`로 한도를 조정할 수 있습니다. 16GB 시스템에서 긴 곡을 동시에 여러 개 분리할 때의 메모리 피크는 별도 측정이 필요합니다. 실행 중 파일 삭제는 409를 반환합니다. Go에서 작업을 취소하려면 다음 API를 사용합니다. 대기 작업은 즉시 취소되며, 실행 중 작업은 추론·DSP 프로세스 정리 또는 Python 분석 단계의 종료 후 상태가 갱신됩니다.
 
@@ -165,9 +165,9 @@ Go와 Python은 같은 저장소의 `job.json`과 결과 파일을 사용합니�
 curl -X POST http://127.0.0.1:8000/api/jobs/JOB_ID/cancel
 ```
 
-스템 캐시와 BPM·키·코드 캐시는 별개입니다. 입력과 분석 라이브러리 버전이 같다면 분리 엔진이나 품질을 바꾸어도 저장된 음악 분석을 재사용할 수 있습니다. 이전 결과는 계속 조회할 수 있습니다. 새 음악 분석 캐시 키는 이 버전에서 처리한 작업부터 기록됩니다. Basic Pitch는 작업당 모델을 한 번 준비해 여섯 스템에 사용합니다.
+스템 캐시와 BPM·키·코드 캐시는 별개입니다. 입력과 분석 라이브러리 버전이 같다면 분리 엔진이나 품질을 바꾸어도 저장된 음악 분석을 재사용할 수 있습니다. Basic Pitch는 작업당 모델 하나를 여섯 스템에 사용합니다. Basic Pitch 0.4.0의 Core ML 경로는 한 번에 최대 8개 입력 창을 추론하고, 배치 실행에 실패하면 기존 단일 창 경로로 다시 시도합니다. 동일한 WAV를 재사용할 때는 모델·의존성 정보와 파일 체크섬이 일치하는 실제 MIDI도 재사용합니다.
 
-`MUSIC_PARALLEL_ANALYSIS=long`은 120초 이상에서 원본 음악 분석과 스템 분리를 겹쳐 실행합니다. 짧은 곡은 두 단계가 자원을 서로 경쟁해 더 느려진 사례가 있어 순차 실행합니다. `0`으로 순차 실행을 강제하고 `1`로 모든 길이에 병렬 실행을 선택할 수 있습니다. 기존 Docker·Render 구성은 FastAPI를 계속 사용합니다.
+`MUSIC_PARALLEL_ANALYSIS=long`은 120초 이상에서 원본 음악 분석과 스템 분리를 겹쳐 실행합니다. 120초 미만은 원본 분석을 분리 후 시작합니다. `0`으로 순차 실행을 강제하고 `1`로 모든 길이에 병렬 실행을 선택할 수 있습니다. 기존 Docker·Render 구성은 FastAPI를 계속 사용합니다.
 
 ## Apple Silicon 가속
 
@@ -184,7 +184,19 @@ backend/.venv-mlx/bin/python -m pip install 'demucs-mlx==1.6.1'
 
 같은 입력·엔진·모델·품질로 완료된 WAV가 남아 있으면 새 작업에서 이를 재사용합니다. 파일 이름이나 분석·MIDI 옵션이 바뀌어도 이미 분리된 WAV는 재사용할 수 있습니다. 각 항목은 라이브러리에서 개별 삭제할 수 있습니다.
 
-### M5 16GB 벤치마크
+### M5 16GB 하이브리드 최적화 벤치마크
+
+같은 합성 MP3를 MLX Standard 및 실제 Basic Pitch MIDI 설정으로 처리했습니다. 각 조건은 3회 측정한 중앙값이며, 업로드부터 완료까지의 시간입니다. 첫 실행은 가중치가 준비된 새 서버에서 측정했습니다. 반복 실행은 이전 결과를 삭제해 실제 추론을 수행했고, 캐시 적중은 완료 결과를 유지한 뒤 다시 업로드해 측정했습니다.
+
+| 입력 길이 | 첫 실행 | 반복 실행 · 캐시 미적중 | 캐시 적중 |
+| --- | ---: | ---: | ---: |
+| 60초 | 10.85 → 7.07초 | 7.84 → 4.65초 | 2.30 → 0.27초 |
+| 180초 | 21.47 → 15.96초 | 17.81 → 14.89초 | 9.03 → 0.66초 |
+| 300초 | 38.93 → 29.85초 | 36.35 → 29.73초 | 18.88 → 0.94초 |
+
+검증한 입력에서 BPM·키·코드·파형은 일치했고, 스템 WAV와 MIDI는 바이트 단위로 일치했습니다. 단계별 시간, 메모리와 테스트 범위는 [백엔드 벤치마크](backend/README.md#hybrid-pipeline-optimization)를 참고하세요.
+
+### 이전 엔진 비교 벤치마크
 
 같은 60초 합성 MP3로 테스트했습니다. 전체 처리 시간은 업로드 대기열과 다운로드를 제외하고 WAV 변환부터 결과 저장까지이며, 실제 Basic Pitch 추출을 포함했습니다. 첫 작업은 새 앱 프로세스 기준이며, 가중치와 운영체제의 GPU 캐시가 준비된 상태에서 측정했습니다.
 
@@ -210,7 +222,7 @@ backend/.venv-mlx/bin/python -m pip install 'demucs-mlx==1.6.1'
 
 MLX의 스템 전용 작업은 2.81초, 재사용한 스템 전용 API 요청은 0.32초였습니다. 180초 음원은 MLX에서 7.03초, 최대 6.56 GiB로 분리했습니다. 가속 모델은 작업마다 별도 프로세스에서 불러오고 종료 시 해제합니다. 모델 최초 다운로드 속도, 실제 Suno 음원의 청감 품질, 최대 길이 20분의 메모리 사용량은 미검증입니다.
 
-하이브리드 전환 후의 60초·180초 비교와 API 처리량은 [백엔드 벤치마크](backend/README.md#hybrid-release-validation)를 참고하세요.
+초기 하이브리드 전환의 60초·180초 비교와 API 처리량은 [백엔드 벤치마크](backend/README.md#hybrid-release-validation)를 참고하세요.
 
 ## 환경 변수
 
@@ -277,7 +289,7 @@ Render의 FastAPI는 단일 Uvicorn 프로세스에서 분석 작업을 하나�
 ```text
 backend/
 ├── go/                     # Go API, 작업 큐, 캐시, 파일 제공과 WAV ZIP
-├── rust/                   # WAV 파형 DSP
+├── rust/                   # WAV 파형 DSP 및 Harmonic 중앙값 필터
 ├── app/hybrid_worker.py    # Go 백엔드의 Python 추론 워커
 ├── app/main.py             # FastAPI 모드 및 공유 API
 ├── app/processor.py        # 변환·분리·분석·MIDI 파이프라인
@@ -287,11 +299,13 @@ backend/
 frontend/
 ├── src/App.tsx             # DAW 스타일 작업 화면
 ├── src/api.ts              # 백엔드 API 클라이언트
-└── src/styles.css          # UI 스타일
+└── src/styles.css          # Tailwind CSS v4 및 파형·타임라인 스타일
 start.command               # 로컬 원클릭 실행 스크립트
 render.yaml                 # Render 배포 설정
 netlify.toml                # Netlify 빌드·SPA 라우팅 설정
 ```
+
+프론트엔드는 React 18, TypeScript, Vite와 Tailwind CSS v4를 사용합니다. Tailwind는 Vite 플러그인으로 빌드하고, 파형과 타임라인에는 기존 동적 스타일을 사용합니다. Netlify 프로젝트에 이전 Node.js 버전이 고정돼 있다면 20 이상을 선택하세요.
 
 ## 개인정보 및 사용 시 유의 사항
 
@@ -302,7 +316,7 @@ netlify.toml                # Netlify 빌드·SPA 라우팅 설정
 
 ## 라이선스
 
-이 프로젝트의 코드는 [PolyForm Noncommercial License 1.0.0](LICENSE)으로 제공됩니다. 개인 학습·연구·취미 등 비상업적 목적으로 코드를 내려받고, 사용·분석·수정·공유할 수 있습니다. 상업적 사용은 별도 허가 없이 허용되지 않습니다. 이 라이선스에서는 소스 코드를 열람할 수 있습니다. 이전 MIT 배포본의 저작권 및 허가 고지는 [LICENSE-LEGACY-MIT](LICENSE-LEGACY-MIT)에 보존되어 있습니다. 의존성, 모델 가중치, 기타 제3자 자료에는 각각의 라이선스가 적용됩니다.
+프로젝트 코드는 [PolyForm Noncommercial License 1.0.0](LICENSE)에 따라 제공됩니다. 비상업적 사용, 재배포 시 고지, 업로드 음원과 파생 파일의 이용, 저장 방식은 [사용 약관](TERMS.md)에서 확인할 수 있습니다. 이전 MIT 배포본의 저작권 및 허가 고지는 [LICENSE-LEGACY-MIT](LICENSE-LEGACY-MIT)에 있습니다.
 
 ---
 
@@ -317,7 +331,9 @@ Local Music Analysis MVP is a local-first, Moises Studio–style music workspace
 ### Highlights
 
 - Six-stem separation with Demucs via Apple MLX, PyTorch MPS, or CPU
-- Local Go API and Rust waveform processing with shared Python inference and a standalone FastAPI mode
+- Local Go API with Rust waveform and harmonic filtering, shared Python inference, and standalone FastAPI
+- Bounded Core ML MIDI batches and validated reuse of MIDI from identical stem WAVs
+- React, TypeScript, and Tailwind CSS v4 through the Vite plugin
 - BPM, beat grid, key/mode, chroma-based chord timeline, and waveform analysis (with librosa installed)
 - Per-stem mute, solo, volume, pan, playback controls, metronome, and local library metadata
 - MIDI extraction with Basic Pitch, or fast placeholder MIDI by default
@@ -326,7 +342,7 @@ Local Music Analysis MVP is a local-first, Moises Studio–style music workspace
 
 ### Run locally
 
-Requirements: Python 3.11 recommended, Node.js 18+, npm, and optionally `ffmpeg` plus the packages in `backend/requirements-optional.txt`.
+Requirements: Python 3.11 recommended, Node.js 20+, npm, and optionally `ffmpeg` plus the packages in `backend/requirements-optional.txt`.
 
 ```bash
 # Easiest on macOS
@@ -359,6 +375,10 @@ Install FFmpeg and the optional Python requirements to enable Demucs, librosa, a
 
 See the Korean documentation above for output layout, environment variables, API routes, deployment guidance, data handling, and operational recommendations.
 
-### License
+### Performance
 
-The project's code is available under the [PolyForm Noncommercial License 1.0.0](LICENSE). You may download, use, study, modify, and share it for noncommercial purposes. Commercial use requires separate permission. The copyright and permission notices for earlier MIT distributions are preserved in [LICENSE-LEGACY-MIT](LICENSE-LEGACY-MIT). Dependencies, model weights, and other third-party materials remain subject to their own licenses.
+On an Apple M5 with 16 GB, uncached repeat time with MLX Standard and real MIDI dropped from 7.84 to 4.65 s at 60 seconds, from 17.81 to 14.89 s at 180 seconds, and from 36.35 to 29.73 s at 300 seconds. See the [benchmark setup and results](backend/README.md#hybrid-pipeline-optimization).
+
+### License and terms
+
+The project code is available under the [PolyForm Noncommercial License 1.0.0](LICENSE). See the [Terms of Use](TERMS.md#english) for licensing, audio permissions, and storage information. The copyright and permission notices for earlier MIT distributions are in [LICENSE-LEGACY-MIT](LICENSE-LEGACY-MIT).

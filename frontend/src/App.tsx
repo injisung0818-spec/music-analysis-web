@@ -780,8 +780,8 @@ export default function App() {
   }
 
   return (
-    <main className="appShell" style={rootStyle}>
-      <header className="topBar">
+    <main className="appShell grid h-screen bg-panel" style={rootStyle}>
+      <header className="topBar relative z-60 flex min-w-0 items-center gap-(--gap) overflow-visible">
         <div className="toolbarGroup appTools">
           <button className="toolButton" data-tooltip="노래 목록 접고 열기" aria-label="노래 목록 접고 열기" onClick={() => setLibraryOpen((open) => !open)}><Icon name="list" /></button>
           <button className={`toolButton ${settingsOpen ? "active" : ""}`} data-tooltip="설정" aria-label="설정" onClick={() => setSettingsOpen((open) => !open)}><Icon name="gear" /></button>
@@ -817,7 +817,7 @@ export default function App() {
           <Metric value="4/4" label="TIME" />
         </div>
 
-        <div className="toolbarTail">
+        <div className="ml-auto inline-flex flex-none items-center gap-(--gap)">
           <div className="toolbarGroup analysisTools">
             <button
               className={`toolButton ${metronomeOn && !analysisSkipped ? "active" : ""}`}
@@ -877,7 +877,7 @@ export default function App() {
         }}
       >
         {libraryOpen && <aside
-          className="library"
+          className="library col-start-1 row-[1/4] min-h-0 overflow-x-hidden overflow-y-auto bg-panel text-muted [border-right:2px_solid_#232323]"
           onDragOver={(event) => {
             if (Array.from(event.dataTransfer.types).includes("application/x-song-id")) {
               event.preventDefault();
@@ -967,19 +967,19 @@ export default function App() {
             />
           ))}
           {!folders.length && !songs.length && (
-            <div className="emptyLibrary">오른쪽 + 버튼으로 폴더나 노래를 추가하세요</div>
+            <div className="mx-[14px] my-[18px] rounded-ui bg-raised p-[14px] text-ui leading-[1.45] text-[#bcbcbc] [border:1px_dashed_#606060]">오른쪽 + 버튼으로 폴더나 노래를 추가하세요</div>
           )}
         </aside>}
-        {libraryOpen && <div className="libraryResizer" onMouseDown={(event) => beginResize("library", event)} />}
+        {libraryOpen && <div className="col-start-2 row-[1/4] cursor-col-resize bg-track-surface [border-left:1px_solid_#111] [border-right:1px_solid_#3d3d3d]" onMouseDown={(event) => beginResize("library", event)} />}
 
         <section className="arranger" style={{ "--timeline-width": `${timelineWidth}px` } as CSSProperties}>
-          <div className="trackHeaderSpacer" />
-          <div className="trackAreaResizer" onMouseDown={(event) => beginResize("tracks", event)} />
-          <div className="rulerViewport" ref={rulerScrollRef}>
+          <div className="col-start-1 row-start-1 border-2 border-solid border-track-edge border-l-0 bg-[#4a4a4a]" />
+          <div className="col-start-2 row-[1/3] z-5 cursor-col-resize bg-[#1d1d1d] [border-left:1px_solid_#101010] [border-right:1px_solid_#363636]" onMouseDown={(event) => beginResize("tracks", event)} />
+          <div className="col-start-3 row-start-1 min-w-0 overflow-hidden [border-right:2px_solid_var(--color-track-edge)]" ref={rulerScrollRef}>
             <Ruler currentTime={currentTime} duration={displayDuration} onSeek={seek} />
           </div>
           <div className="trackControlsScroller" ref={controlsScrollRef} onScroll={() => syncVerticalScroll("controls")}>
-            <div className="trackControlsStack">
+            <div className="min-w-0 [direction:ltr]">
               {stems.map((stem) => (
                 <TrackControlsRow
                   key={stem.name}
@@ -992,7 +992,7 @@ export default function App() {
             </div>
           </div>
           <div className="lanesScroller" ref={lanesScrollRef} onScroll={syncHorizontalScroll}>
-            <div className="lanesStack">
+            <div className="w-(--timeline-width)">
               {stems.map((stem) => (
                 <RegionLane
                   key={stem.name}
@@ -1019,16 +1019,16 @@ export default function App() {
           ))}
         </section>
 
-        <div className="editorResizer" onMouseDown={(event) => beginResize("editor", event)} />
+        <div className="col-start-3 row-start-2 cursor-row-resize bg-[#1a1a1a] [border-top:1px_solid_#101010] [border-bottom:1px_solid_#333]" onMouseDown={(event) => beginResize("editor", event)} />
 
         <section className="editorPanel">
-          <div className="editorTitle">
+          <div className="editorTitle flex items-center gap-[16px] bg-[#212121] px-[18px] [border-bottom:1px_solid_var(--color-raised)]">
             <strong>{lyricsVisible ? "가사" : "분석"}</strong>
             <span>{analysis ? `${formatTime(analysis.duration)} · ${analysisSkipped ? "스템 분리만" : `${analysis.chords.length}개 코드 · ${analysis.beats.length}개 비트`}` : "분석 결과 대기 중"}</span>
           </div>
           {chordsVisible && <ChordTimeline analysis={analysis} currentTime={currentTime} onSeek={seek} />}
           {lyricsVisible && <LyricsPanel title={activeSongTitle} />}
-          <div className="editorDetails">
+          <div className="editorDetails flex flex-wrap items-center gap-[28px] px-[18px] py-[16px] text-secondary">
             <span>BPM <strong>{analysis && !analysisSkipped ? Math.round(analysis.bpm) : "--"}</strong></span>
             <span>KEY <strong>{analysis && !analysisSkipped ? `${analysis.key} ${modeLabel(analysis.mode)}` : "--"}</strong></span>
             <span>MIDI <strong>{analysis ? analysis.stems.filter((stem) => stem.midi_url).length : 0}</strong></span>
@@ -1046,7 +1046,7 @@ export default function App() {
             </div>
           )}
           {(job?.warnings.length || analysis?.warnings.length) ? (
-            <div className="warnings">
+            <div className="warnings mx-[18px] mb-[18px] rounded-ui bg-[#2b281b] p-[12px] text-[12px] leading-[1.45] text-[#e3d69d] [border:1px_solid_#5a5333]">
               {(analysis?.warnings ?? job?.warnings ?? []).map((warning, index) => <p key={`${warning}-${index}`}>{translateWarning(warning)}</p>)}
             </div>
           ) : null}
@@ -1132,7 +1132,7 @@ function TopPopovers({
   job: JobResponse | null;
 }) {
   return (
-    <div className="topPopovers" aria-live="polite">
+    <div className="pointer-events-none absolute inset-0 z-15" aria-live="polite">
       {settingsOpen && (
         <div className="popover settingsPopover">
           <strong>설정</strong>
@@ -1248,64 +1248,65 @@ function ModalLayer({
   const message = messageLabel(job?.message) ?? (fileName ? "파일 분석을 준비 중입니다" : "MP3 또는 WAV 파일을 선택하세요");
   const exportableStems = analysis?.stems.filter((stem) => stem.audio_url) ?? [];
   return (
-    <div className="modalOverlay" role="presentation">
+    <div className="fixed inset-0 z-80 grid place-items-center bg-[rgba(0,0,0,0.42)] [backdrop-filter:brightness(0.82)]" role="presentation">
       {view === "add" && (
-        <section className="modalPanel addModal" role="dialog" aria-modal="true" aria-label="추가">
-          <button className="modalClose" aria-label="닫기" onClick={onClose}>×</button>
+        <section className="modalPanel modalWidth" role="dialog" aria-modal="true" aria-label="추가">
+          <button className="absolute top-[10px] right-[10px] size-[32px] cursor-pointer rounded-[5px] [border:0] bg-transparent text-[24px] leading-none text-[#dcdcdc] [&:hover]:bg-selected" aria-label="닫기" onClick={onClose}>×</button>
           <strong>추가</strong>
-          <div className="addChoices">
-            <button onClick={onAddFolder}>
-              <span>폴더</span>
-              <small>새로운 폴더 생성</small>
+          <div className="grid grid-cols-2 gap-[12px]">
+            <button className="dialogControl dialogControlBorder min-h-[118px] p-[18px]" onClick={onAddFolder}>
+              <span className="text-[18px] font-extrabold">폴더</span>
+              <small className="text-[12px] text-[#bdbdbd]">새로운 폴더 생성</small>
             </button>
-            <button onClick={onOpenUpload}>
-              <span>노래</span>
-              <small>MP3/WAV 업로드</small>
+            <button className="dialogControl dialogControlBorder min-h-[118px] p-[18px]" onClick={onOpenUpload}>
+              <span className="text-[18px] font-extrabold">노래</span>
+              <small className="text-[12px] text-[#bdbdbd]">MP3/WAV 업로드</small>
             </button>
           </div>
         </section>
       )}
 
       {view === "export" && (
-        <section className="modalPanel exportModal" role="dialog" aria-modal="true" aria-label="내보내기">
-          <button className="modalClose" aria-label="닫기" onClick={onClose}>×</button>
+        <section className="modalPanel w-[min(620px,calc(100vw_-_40px))]" role="dialog" aria-modal="true" aria-label="내보내기">
+          <button className="absolute top-[10px] right-[10px] size-[32px] cursor-pointer rounded-[5px] [border:0] bg-transparent text-[24px] leading-none text-[#dcdcdc] [&:hover]:bg-selected" aria-label="닫기" onClick={onClose}>×</button>
           <strong>내보내기</strong>
-          <label className="modalSelect">
+          <label className="flex flex-wrap items-center gap-[10px] text-ui text-muted">
             파일 형식
-            <select value={exportFormat} disabled={exportBusy} onChange={(event) => onExportFormatChange(event.target.value as AudioFormat)}>
+            <select className="dialogSelect" value={exportFormat} disabled={exportBusy} onChange={(event) => onExportFormatChange(event.target.value as AudioFormat)}>
               <option value="wav">WAV · PCM</option>
               <option value="flac">FLAC · 무손실 압축</option>
               <option value="m4a">M4A · AAC</option>
             </select>
           </label>
           {analysis && !analysis.stem_audio && <small>이전 작업의 저장된 스템에서 변환합니다. AAC 원본의 손실은 복원되지 않습니다.</small>}
-          <div className="exportChoices">
-            <div className="exportActions">
-              <button disabled={exportBusy} onClick={() => void onExportWhole()}>전체 믹스 다운로드</button>
-              <button disabled={exportBusy} onClick={onExportInstrumental}>Instrumental 다운로드</button>
-              <button disabled={exportBusy} onClick={onExportAllStems}>6개 스템 ZIP 다운로드</button>
+          <div className="exportChoices grid grid-cols-[minmax(150px,0.85fr)_minmax(240px,1.15fr)] gap-[12px] [@media(max-width:640px)]:grid-cols-1">
+            <div className="grid [align-content:start] gap-ui">
+              <button className="dialogControl dialogControlBorder min-h-[36px] px-[10px] py-[6px]" disabled={exportBusy} onClick={() => void onExportWhole()}>전체 믹스 다운로드</button>
+              <button className="dialogControl dialogControlBorder min-h-[36px] px-[10px] py-[6px]" disabled={exportBusy} onClick={onExportInstrumental}>Instrumental 다운로드</button>
+              <button className="dialogControl dialogControlBorder min-h-[36px] px-[10px] py-[6px]" disabled={exportBusy} onClick={onExportAllStems}>6개 스템 ZIP 다운로드</button>
             </div>
-            <div className="stemExportBox">
-              <span>파트별</span>
-              <div className="stemChecks">
+            <div className="grid min-h-[180px] [align-content:start] gap-[10px] rounded-control border border-solid border-control bg-(image:--control-gradient) p-[18px] text-primary">
+              <span className="text-[18px] font-extrabold">파트별</span>
+              <div className="grid grid-cols-2 gap-ui">
                 {exportableStems.map((stem) => (
-                  <div className="stemExportRow" key={stem.name}>
-                    <label>
-                      <input
+                  <div className="flex gap-[4px]" key={stem.name}>
+                    <label className="flex min-h-[30px] flex-[1] items-center gap-[7px] rounded-[5px] border border-solid border-[#4f4f4f] bg-[#2d2d2d] px-ui py-[5px] text-ui font-extrabold text-primary">
+                      <input className="accent-check"
                         type="checkbox"
                         checked={exportStemSelection.includes(stem.name)}
                         disabled={exportBusy}
                         onChange={() => onToggleExportStem(stem.name)}
                       />
-                      <b style={{ background: stem.color }} />
+                      <b className="size-[10px] rounded-[50%]" style={{ background: stem.color }} />
                       {STEM_LABELS[stem.name]}
                     </label>
-                    <button type="button" disabled={exportBusy} onClick={() => onExportSingle(stem.name)} aria-label={`${STEM_LABELS[stem.name]} 다운로드`}>↓</button>
+                    <button className="dialogControl dialogControlBorder min-h-[36px] px-[10px] py-[6px]" type="button" disabled={exportBusy} onClick={() => onExportSingle(stem.name)} aria-label={`${STEM_LABELS[stem.name]} 다운로드`}>↓</button>
                   </div>
                 ))}
               </div>
-              <label className="exportModeToggle">
+              <label className="flex min-h-[34px] items-center gap-ui rounded-[5px] border border-solid border-control bg-raised px-[9px] py-[6px] text-ui font-extrabold text-[#f2f2f2]">
                 <input
+                  className="accent-check"
                   type="checkbox"
                   checked={exportSeparateStems}
                   disabled={exportBusy}
@@ -1313,43 +1314,44 @@ function ModalLayer({
                 />
                 선택한 파트를 ZIP으로 묶기
               </label>
-              <button className="exportSubmit" disabled={exportBusy || !exportStemSelection.length} onClick={() => void onExportSelected()}>
+              <button className="dialogControl min-h-[42px] border-[#68d7e5] px-[14px] py-[10px]" disabled={exportBusy || !exportStemSelection.length} onClick={() => void onExportSelected()}>
                 선택한 파트 {exportSeparateStems ? "ZIP" : "믹스"} 다운로드
               </button>
             </div>
           </div>
           {exportBusy && <small role="status">내보내는 중</small>}
-          {error && <p className="modalError">{error}</p>}
+          {error && <p className="m-0 text-ui font-extrabold text-failure">{error}</p>}
         </section>
       )}
 
       {view === "upload" && (
-        <section className="modalPanel uploadModal" role="dialog" aria-modal="true" aria-label="노래 업로드">
-          <button className="modalClose" aria-label="닫기" onClick={onClose}>×</button>
+        <section className="modalPanel modalWidth" role="dialog" aria-modal="true" aria-label="노래 업로드">
+          <button className="absolute top-[10px] right-[10px] size-[32px] cursor-pointer rounded-[5px] [border:0] bg-transparent text-[24px] leading-none text-[#dcdcdc] [&:hover]:bg-selected" aria-label="닫기" onClick={onClose}>×</button>
           <strong>노래 업로드</strong>
-          <label className="modalSelect">
+          <label className="flex flex-wrap items-center gap-[10px] text-ui text-muted">
             분리 품질
-            <select value={separationQuality} disabled={uploadBusy} onChange={(event) => onQualityChange(event.target.value as SeparationQuality)}>
+            <select className="dialogSelect" value={separationQuality} disabled={uploadBusy} onChange={(event) => onQualityChange(event.target.value as SeparationQuality)}>
               <option value="standard">Standard</option>
               <option value="high">High Quality</option>
             </select>
           </label>
           {separationQuality === "high" && <small>여러 번 추론하므로 더 오래 걸리며, 개선 폭은 곡에 따라 다릅니다.</small>}
-          <label className="modalSelect">
+          <label className="flex flex-wrap items-center gap-[10px] text-ui text-muted">
             분리 엔진
-            <select value={separationEngine} disabled={uploadBusy} onChange={(event) => onEngineChange(event.target.value as SeparationEngine | "")}>
+            <select className="dialogSelect" value={separationEngine} disabled={uploadBusy} onChange={(event) => onEngineChange(event.target.value as SeparationEngine | "")}>
               <option value="">서버 기본값</option>
               <option value="torch">PyTorch</option>
               <option value="mps">PyTorch MPS · Mac</option>
               <option value="mlx">Fast · MLX · Apple Silicon</option>
             </select>
           </label>
-          <label className="modalSelect">
+          <label className="flex flex-wrap items-center gap-[10px] text-ui text-muted">
             <input type="checkbox" checked={stemsOnly} disabled={uploadBusy} onChange={(event) => onStemsOnlyChange(event.target.checked)} />
             스템만 분리 (BPM·키·코드 및 MIDI 생략)
           </label>
-          <label className="fileDropButton">
+          <label className="dialogControl dialogControlBorder relative min-h-[110px] overflow-hidden p-[18px] text-center">
             <input
+              className="absolute inset-0 m-0 h-full w-full cursor-pointer p-0 opacity-0"
               type="file"
               disabled={uploadBusy}
               accept=".mp3,.wav,audio/mpeg,audio/wav"
@@ -1359,10 +1361,10 @@ function ModalLayer({
                 if (file) void onFile(file);
               }}
             />
-            <span>{fileName || "파일 선택"}</span>
-            <small>MP3 또는 WAV</small>
+            <span className="text-[18px] font-extrabold">{fileName || "파일 선택"}</span>
+            <small className="text-[12px] text-[#bdbdbd]">MP3 또는 WAV</small>
           </label>
-          <div className="uploadStatus">
+          <div className="uploadStatus grid grid-cols-[1fr_auto] gap-[10px] rounded-ui border border-solid border-[#252525] bg-[#252525] p-[14px] text-ui text-[#cfcfcf]">
             <span>{uploadBusy ? "업로드 중" : status}</span>
             <strong>{progress}%</strong>
             <div className="meterBar">
@@ -1406,9 +1408,10 @@ function LibraryRow({
 
   return (
     <div className="libraryFolder" onDoubleClick={onEdit}>
-      <button aria-label={open ? "폴더 닫기" : "폴더 열기"} onClick={onToggle}>{open ? "▼" : "▶"}</button>
+      <button className="folderButton" aria-label={open ? "폴더 닫기" : "폴더 열기"} onClick={onToggle}>{open ? "▼" : "▶"}</button>
       {editing ? (
         <input
+          className="h-[30px] w-full min-w-0 rounded-[4px] border border-solid border-[rgba(116,214,239,0.7)] bg-[#2a2a2a] px-ui text-white outline-none"
           autoFocus
           value={draft}
           onChange={(event) => setDraft(event.target.value)}
@@ -1422,7 +1425,7 @@ function LibraryRow({
         <strong>{label}</strong>
       )}
       <button
-        className="folderMenuButton"
+        className="folderButton rowMenuButton"
         aria-label="폴더 메뉴"
         onClick={(event) => {
           event.stopPropagation();
@@ -1430,9 +1433,9 @@ function LibraryRow({
         }}
       >⋮</button>
       {menuOpen && (
-        <div className="folderMenu" onClick={(event) => event.stopPropagation()}>
-          <button onClick={onEdit}>이름 수정</button>
-          <button className="danger" onClick={onDelete}>폴더 지우기</button>
+        <div className="libraryMenu top-[40px] z-55 w-[126px]" onClick={(event) => event.stopPropagation()}>
+          <button className="libraryMenuItem text-primary" onClick={onEdit}>이름 수정</button>
+          <button className="libraryMenuItem text-[#ffb6b6]" onClick={onDelete}>폴더 지우기</button>
         </div>
       )}
     </div>
@@ -1507,7 +1510,7 @@ function SongRow({
       )}
       <button
         aria-label="노래 메뉴"
-        className="songMenuButton"
+        className="rowMenuButton h-[32px] cursor-pointer [border:0] text-[25px] text-[#d9d9d9] disabled:cursor-default disabled:opacity-[0.35]"
         disabled={loading}
         onClick={(event) => {
           event.stopPropagation();
@@ -1515,10 +1518,10 @@ function SongRow({
         }}
       >⋮</button>
       {menuOpen && (
-        <div className="songMenu" onClick={(event) => event.stopPropagation()}>
-          <button onClick={onTogglePin}>{pinned ? "고정 해제" : "고정"}</button>
-          <button onClick={onEdit}>이름 수정</button>
-          <button className="danger" onClick={onDelete}>지우기</button>
+        <div className="libraryMenu top-[34px] z-50 w-[116px]" onClick={(event) => event.stopPropagation()}>
+          <button className="libraryMenuItem text-primary" onClick={onTogglePin}>{pinned ? "고정 해제" : "고정"}</button>
+          <button className="libraryMenuItem text-primary" onClick={onEdit}>이름 수정</button>
+          <button className="libraryMenuItem text-[#ffb6b6]" onClick={onDelete}>지우기</button>
         </div>
       )}
     </div>
@@ -1555,12 +1558,12 @@ function TrackControlsRow({
 }) {
   return (
     <div className="trackControls" style={{ "--accent": color } as CSSProperties}>
-      <div className="stemIcon">
-        <img src={STEM_ICONS[name]} alt="" aria-hidden="true" />
+      <div className="relative grid size-[clamp(56px,2.8125vw,72px)] place-items-center">
+        <img className="h-full w-full object-contain [filter:drop-shadow(0_1px_0_rgba(0,0,0,0.22))]" src={STEM_ICONS[name]} alt="" aria-hidden="true" />
       </div>
-      <div className="trackMeta">
+      <div className="trackMeta grid gap-[10px]">
         <strong>{STEM_LABELS[name]}</strong>
-        <div className="trackButtons">
+        <div className="trackButtons inline-grid w-[88px] grid-cols-[44px_44px] overflow-hidden rounded-[5px] border border-solid border-[rgba(20,20,20,0.24)] bg-[#444]">
           <button className={state.muted ? "active" : ""} onClick={() => onUpdate(name, { muted: !state.muted })}>M</button>
           <button className={state.solo ? "solo active" : ""} onClick={() => onUpdate(name, { solo: !state.solo })}>S</button>
         </div>
@@ -1574,7 +1577,7 @@ function TrackControlsRow({
         value={state.volume}
         onChange={(event) => onUpdate(name, { volume: Number(event.target.value) })}
       />
-      <label className="panControl">
+      <label className="panControl relative grid h-[90px] w-[86px] place-items-center justify-self-center">
         <input
           aria-label={`${STEM_LABELS[name]} 좌우 음향`}
           type="range"
@@ -1626,9 +1629,9 @@ function RegionLane({
       }}
     >
       <div className="region">
-        <div className={`regionWave ${peaks.length ? "" : "empty"}`}>
+        <div className={`regionWave relative h-full py-[7px] ${peaks.length ? "" : "empty"}`}>
           {peaks.length ? (
-            <svg className="waveSvg" viewBox="0 0 1000 100" preserveAspectRatio="none" aria-hidden="true">
+            <svg className="waveSvg block h-full w-full" viewBox="0 0 1000 100" preserveAspectRatio="none" aria-hidden="true">
               <line x1="0" x2="1000" y1="50" y2="50" />
               <path d={wavePath} />
             </svg>

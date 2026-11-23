@@ -61,7 +61,7 @@ async def process_job(job_id: str, cache: dict[str, list[str]]) -> None:
         job.updated_at = now_iso()
         main.store._write_state(job)
 
-    async def reuse(key: str, destination: Path) -> bool:
+    async def reuse(key: str, destination: Path) -> Path | None:
         for candidate in cache.get(key, []):
             if not re.fullmatch(r"[0-9a-f]{32}", candidate):
                 continue
@@ -76,8 +76,8 @@ async def process_job(job_id: str, cache: dict[str, list[str]]) -> None:
             except OSError:
                 shutil.rmtree(destination, ignore_errors=True)
             else:
-                return True
-        return False
+                return main.JOBS_DIR / candidate
+        return None
 
     async def reuse_music(key: str) -> dict | None:
         for candidate in cache.get(key, []):

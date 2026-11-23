@@ -21,6 +21,9 @@ from typing import Literal, TypeVar
 
 import soundfile
 
+from .coreml_midi import write_coreml_midi
+from .harmonic import harmonic_filter
+from .midi_cache import cache_signature, mark_midi, reuse_midi
 from .separation import Engine, SeparationPlan
 
 from pydantic import BaseModel
@@ -90,7 +93,7 @@ class MusicProcessor:
     def __init__(
         self,
         update_job: Callable[[JobState], Awaitable[None]],
-        link_cached_stems: Callable[[str, Path], Awaitable[bool]] | None = None,
+        link_cached_stems: Callable[[str, Path], Awaitable[Path | None]] | None = None,
         load_cached_music: Callable[[str], Awaitable[dict | None]] | None = None,
     ) -> None:
         self.update_job = update_job
@@ -121,6 +124,7 @@ class MusicProcessor:
             await self._set(state, "running", 0.16, "Demucs 및 htdemucs_6s 모델 준비 중")
             stem_paths: dict[str, Path] = {}
             stem_audio = None
+            cached_stem_job = None
             music_key = music_cache_key(digest) if state.music_analysis and digest and self.load_cached_music else None
             cached_music = await self.load_cached_music(music_key) if music_key and self.load_cached_music else None
             parallel = os.getenv("MUSIC_PARALLEL_ANALYSIS") == "long" and soundfile.info(converted).duration >= 120
@@ -130,7 +134,7 @@ class MusicProcessor:
                 music_task = asyncio.create_task(finish_thread_on_cancel(self._analyze_music, converted))
             started = perf_counter()
             try:
-                stem_paths, stem_audio = await self._separate_stems(converted, stems_dir, state, digest)
+                stem_paths, stem_audio, cached_stem_job = await self._separate_stems(converted, stems_dir, state, digest)
             except (RuntimeError, OSError) as exc:
                 state.separation_status = "failed"
                 state.separation_error = str(exc)
@@ -167,7 +171,7 @@ class MusicProcessor:
                 midi_dir.mkdir(exist_ok=True)
                 await self._set(state, "running", 0.76, "MIDI 추출 중")
                 started = perf_counter()
-                midi_paths = await self._extract_midi(stem_paths, midi_dir, state)
+                midi_paths = await self._extract_midi(stem_paths, midi_dir, state, cached_stem_job)
                 state.timings["midi"] = perf_counter() - started
             await self._set(state, "running", 0.92, "결과 저장 중")
 
@@ -267,7 +271,7 @@ class MusicProcessor:
 
     async def _separate_stems(
         self, audio_wav: Path, stems_dir: Path, state: JobState, input_digest: str | None = None
-    ) -> tuple[dict[str, Path], dict[str, int]]:
+    ) -> tuple[dict[str, Path], dict[str, int], Path | None]:
         if not env_flag("MUSIC_ENABLE_DEMUCS", True):
             raise RuntimeError("이 서버에서는 Demucs 스템 분리가 비활성화되어 있습니다.")
         requested = state.separation_engine
@@ -295,7 +299,7 @@ class MusicProcessor:
 
     async def _run_separation(
         self, plan: SeparationPlan, audio_wav: Path, stems_dir: Path, state: JobState, input_digest: str | None
-    ) -> tuple[dict[str, Path], dict[str, int]]:
+    ) -> tuple[dict[str, Path], dict[str, int], Path | None]:
         if plan.engine != "mlx" and not demucs_installed():
             raise RuntimeError("이 서버의 Python 환경에 Demucs가 없습니다. start.command 또는 requirements-optional.txt로 설치하세요.")
 
@@ -309,7 +313,8 @@ class MusicProcessor:
             return await asyncio.to_thread(plan.cache_key, input_digest, shifts, overlap)
 
         key = await cache_key()
-        if key and self.link_cached_stems and await self.link_cached_stems(key, out_dir):
+        cached_job = await self.link_cached_stems(key, out_dir) if key and self.link_cached_stems else None
+        if cached_job is not None:
             cached_paths = {name: out_dir / f"{name}.wav" for name in STEMS}
             try:
                 metadata = await finish_thread_on_cancel(validate_stem_wavs, cached_paths, audio_wav)
@@ -321,7 +326,7 @@ class MusicProcessor:
                 state.separation_cache_key = key
                 state.actual_separation_engine = plan.engine
                 await self._set(state, "running", 0.52, "저장된 6개 스템 재사용")
-                return published, metadata
+                return published, metadata, cached_job
 
         cmd, model_dir, env = plan.command(audio_wav, out_dir, shifts, overlap)
         inference_start = None
@@ -362,7 +367,7 @@ class MusicProcessor:
         metadata = await finish_thread_on_cancel(validate_stem_wavs, paths, audio_wav)
         state.actual_separation_engine = plan.engine
         state.separation_cache_key = await cache_key()
-        return publish_stem_wavs(paths, out_dir, stems_dir), metadata
+        return publish_stem_wavs(paths, out_dir, stems_dir), metadata, None
 
     async def _run_command(
         self,
@@ -450,7 +455,7 @@ class MusicProcessor:
             timings["bpm"] = perf_counter() - started
             started = perf_counter()
             try:
-                harmonic = librosa.effects.harmonic(y)
+                harmonic = harmonic_filter(librosa, y, os.getenv("MUSIC_RUST_DSP"))
                 chroma = librosa.feature.chroma_cqt(
                     y=harmonic,
                     sr=sr,
@@ -491,18 +496,47 @@ class MusicProcessor:
                 "chords": chords,
             }, timings, warning
 
-    async def _extract_midi(self, stem_paths: dict[str, Path], midi_dir: Path, state: JobState) -> dict[str, Path]:
+    async def _extract_midi(
+        self, stem_paths: dict[str, Path], midi_dir: Path, state: JobState, cached_job: Path | None,
+    ) -> dict[str, Path]:
         if env_flag("MUSIC_FAST_UPLOAD", True):
             state.warnings.append("빠른 업로드 모드로 basic-pitch MIDI 추출을 건너뛰고 placeholder MIDI 파일을 생성했습니다.")
             return write_placeholder_midis(midi_dir)
+
+        signature = await finish_thread_on_cancel(cache_signature) if state.separation_cache_key else None
+        if cached_job is not None and signature:
+            reused = await finish_thread_on_cancel(
+                reuse_midi, cached_job / "midi", midi_dir, tuple(stem_paths), signature,
+            )
+            if reused:
+                await finish_thread_on_cancel(mark_midi, midi_dir, reused, signature)
+                return reused
 
         try:
             from basic_pitch import ICASSP_2022_MODEL_PATH
             from basic_pitch.inference import Model, predict_and_save
 
             model = await finish_thread_on_cancel(Model, ICASSP_2022_MODEL_PATH)
+            use_coreml_batch = False
+            if model.model_type == Model.MODEL_TYPES.COREML:
+                with suppress(PackageNotFoundError):
+                    use_coreml_batch = version("basic-pitch") == "0.4.0"
             midi_paths = {}
+            all_generated = True
             for stem, path in stem_paths.items():
+                target = midi_dir / f"{stem}.mid"
+                generated = midi_dir / f"{path.stem}_basic_pitch.mid"
+                if use_coreml_batch:
+                    try:
+                        await finish_thread_on_cancel(write_coreml_midi, path, generated, model)
+                    except Exception:
+                        # Retry this stem and subsequent stems via Basic Pitch's supported single-window path.
+                        use_coreml_batch = False
+                        generated.unlink(missing_ok=True)
+                    else:
+                        generated.replace(target)
+                        midi_paths[stem] = target
+                        continue
                 await finish_thread_on_cancel(
                     predict_and_save,
                     [str(path)],
@@ -513,13 +547,14 @@ class MusicProcessor:
                     False,
                     model,
                 )
-                generated = midi_dir / f"{path.stem}_basic_pitch.mid"
-                target = midi_dir / f"{stem}.mid"
                 if generated.exists():
                     generated.replace(target)
                 else:
+                    all_generated = False
                     write_minimal_midi(target, stem)
                 midi_paths[stem] = target
+            if signature and all_generated:
+                await finish_thread_on_cancel(mark_midi, midi_dir, midi_paths, signature)
             return midi_paths
         except Exception as exc:
             state.warnings.append(f"basic-pitch가 설치되어 있지 않거나 MIDI 추출에 실패해 placeholder MIDI 파일을 생성했습니다. 상세: {exc}")
