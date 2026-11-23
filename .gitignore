@@ -12,3 +12,5 @@ frontend/*.tsbuildinfo
 __pycache__/
 backend/rust/target/
 backend/.hybrid-bin/
+/backend/backend.log
+/frontend/frontend.log

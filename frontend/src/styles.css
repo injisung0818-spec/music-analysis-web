@@ -3,6 +3,8 @@
 @import "tailwindcss/theme.css" layer(theme);
 @import "tailwindcss/utilities.css" layer(utilities) source(none);
 @source "./App.tsx";
+@source "./ModalLayer.tsx";
+@source "./Timeline.tsx";
 
 @theme {
   --color-canvas: #3a3a3a;

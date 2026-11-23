@@ -25,7 +25,7 @@ from . import exports
 from .exports import AudioFormat
 from .processor import (
     STEMS, JobState, MusicProcessor, SeparationQuality, SeparationStatus,
-    cleanup_failed_artifacts, demucs_installed, env_flag, find_executable, now_iso, read_cached_music,
+    cleanup_failed_artifacts, demucs_installed, env_flag, find_executable, link_stem_wavs, now_iso, read_cached_music,
 )
 
 from .separation import Engine, MODEL as DEMUCS_MODEL, default_engine
@@ -177,15 +177,9 @@ class JobStore:
             for job in reversed(self.jobs.values()):
                 if job.status != "done" or job.separation_status != "succeeded" or job.separation_cache_key != key:
                     continue
-                try:
-                    destination.mkdir()
-                    for name in STEMS:
-                        filename = f"{name}.wav"
-                        os.link(JOBS_DIR / job.id / "stems" / filename, destination / filename)
-                except OSError:
-                    shutil.rmtree(destination, ignore_errors=True)
-                else:
-                    return JOBS_DIR / job.id
+                job_dir = JOBS_DIR / job.id
+                if link_stem_wavs(job_dir / "stems", destination):
+                    return job_dir
         return None
 
     async def load_cached_music(self, key: str) -> dict | None:

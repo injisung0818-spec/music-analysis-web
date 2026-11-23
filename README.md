@@ -184,7 +184,13 @@ backend/.venv-mlx/bin/python -m pip install 'demucs-mlx==1.6.1'
 
 같은 입력·엔진·모델·품질로 완료된 WAV가 남아 있으면 새 작업에서 이를 재사용합니다. 파일 이름이나 분석·MIDI 옵션이 바뀌어도 이미 분리된 WAV는 재사용할 수 있습니다. 각 항목은 라이브러리에서 개별 삭제할 수 있습니다.
 
-### M5 16GB 하이브리드 최적화 벤치마크
+### 프로젝트 경량화
+
+Apple M5 16GB의 개발 환경에서 프로젝트 디스크 사용량이 **2,243.4 MiB → 2,190.1 MiB**로 줄었습니다. 사용하지 않던 Essentia를 제거해 Python 환경을 약 47.2 MiB 줄였고, 배포용 Go 실행 파일은 9.82 MiB에서 6.76 MiB로 줄였습니다. 모델 캐시와 기존 작업 파일은 재사용합니다.
+
+프론트엔드는 모달과 타임라인을 분리하고, 재생 중 같은 스템의 SVG 파형을 다시 계산하지 않도록 정리했습니다. 1440px·1280px에서 화면 캡처 10쌍이 픽셀 단위로 일치했고, 기준 작업과 스템 WAV·MIDI도 바이트 단위로 일치했습니다. 시작 시간, 60·180·300초 처리 결과와 메모리 교차 측정은 [경량화 검증](backend/README.md#project-footprint-validation)을 참고하세요.
+
+### 이전 하이브리드 최적화 벤치마크
 
 같은 합성 MP3를 MLX Standard 및 실제 Basic Pitch MIDI 설정으로 처리했습니다. 각 조건은 3회 측정한 중앙값이며, 업로드부터 완료까지의 시간입니다. 첫 실행은 가중치가 준비된 새 서버에서 측정했습니다. 반복 실행은 이전 결과를 삭제해 실제 추론을 수행했고, 캐시 적중은 완료 결과를 유지한 뒤 다시 업로드해 측정했습니다.
 
@@ -292,12 +298,15 @@ backend/
 ├── rust/                   # WAV 파형 DSP 및 Harmonic 중앙값 필터
 ├── app/hybrid_worker.py    # Go 백엔드의 Python 추론 워커
 ├── app/main.py             # FastAPI 모드 및 공유 API
-├── app/processor.py        # 변환·분리·분석·MIDI 파이프라인
+├── app/processor.py        # 변환·분리·MIDI와 작업 오케스트레이션
+├── app/music_analysis.py   # BPM·키·코드 분석
 ├── app/exports.py          # 믹스·개별 스템·ZIP 내보내기
 ├── requirements.txt        # 필수 Python 의존성
 └── requirements-optional.txt
 frontend/
 ├── src/App.tsx             # DAW 스타일 작업 화면
+├── src/ModalLayer.tsx      # 추가·업로드·내보내기 모달
+├── src/Timeline.tsx        # 탐색, 파형, 코드 타임라인
 ├── src/api.ts              # 백엔드 API 클라이언트
 └── src/styles.css          # Tailwind CSS v4 및 파형·타임라인 스타일
 start.command               # 로컬 원클릭 실행 스크립트
@@ -316,7 +325,7 @@ netlify.toml                # Netlify 빌드·SPA 라우팅 설정
 
 ## 라이선스
 
-프로젝트 코드는 [PolyForm Noncommercial License 1.0.0](LICENSE)에 따라 제공됩니다. 비상업적 사용, 재배포 시 고지, 업로드 음원과 파생 파일의 이용, 저장 방식은 [사용 약관](TERMS.md)에서 확인할 수 있습니다. 이전 MIT 배포본의 저작권 및 허가 고지는 [LICENSE-LEGACY-MIT](LICENSE-LEGACY-MIT)에 있습니다.
+프로젝트 코드는 [PolyForm Noncommercial License 1.0.0](LICENSE)에 따라 제공됩니다. 코드를 재배포할 때 라이선스 원문 또는 공식 URL과 `LICENSE`의 `Required Notice:` 문구를 함께 전달하세요. 업로드 음원과 파생 파일의 이용 및 저장 방식은 [사용 약관](TERMS.md)에서 확인할 수 있습니다. 이전 MIT 배포본의 저작권 및 허가 고지는 [LICENSE-LEGACY-MIT](LICENSE-LEGACY-MIT)에 있습니다.
 
 ---
 
@@ -375,10 +384,12 @@ Install FFmpeg and the optional Python requirements to enable Demucs, librosa, a
 
 See the Korean documentation above for output layout, environment variables, API routes, deployment guidance, data handling, and operational recommendations.
 
-### Performance
+### Footprint and performance
 
-On an Apple M5 with 16 GB, uncached repeat time with MLX Standard and real MIDI dropped from 7.84 to 4.65 s at 60 seconds, from 17.81 to 14.89 s at 180 seconds, and from 36.35 to 29.73 s at 300 seconds. See the [benchmark setup and results](backend/README.md#hybrid-pipeline-optimization).
+Local checkout disk use fell by 53.2 MiB on an Apple M5 with 16 GB of memory. Removing unused Essentia accounted for 47.2 MiB, and the stripped Go release binary fell from 9.82 to 6.76 MiB. Synthetic benchmark outputs and the verified DAW screens matched the prior revision. See [footprint measurements and the 300-second crossover check](backend/README.md#project-footprint-validation).
+
+In the earlier pipeline benchmark on an Apple M5 with 16 GB, uncached repeat time with MLX Standard and real MIDI dropped from 7.84 to 4.65 s at 60 seconds, from 17.81 to 14.89 s at 180 seconds, and from 36.35 to 29.73 s at 300 seconds. See the [benchmark setup and results](backend/README.md#hybrid-pipeline-optimization).
 
 ### License and terms
 
-The project code is available under the [PolyForm Noncommercial License 1.0.0](LICENSE). See the [Terms of Use](TERMS.md#english) for licensing, audio permissions, and storage information. The copyright and permission notices for earlier MIT distributions are in [LICENSE-LEGACY-MIT](LICENSE-LEGACY-MIT).
+The project code is available under the [PolyForm Noncommercial License 1.0.0](LICENSE). When redistributing the code, include the license text or its official URL and the applicable `Required Notice:` lines from `LICENSE`. See the [Terms of Use](TERMS.md#english) for audio permissions and storage information. The copyright and permission notices for earlier MIT distributions are in [LICENSE-LEGACY-MIT](LICENSE-LEGACY-MIT).

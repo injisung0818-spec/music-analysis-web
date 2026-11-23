@@ -1,5 +1,8 @@
 .venv
 .venv311
+.venv-mlx
+.hybrid-bin
+rust/target
 __pycache__
 *.pyc
 *.log

@@ -1,3 +1,6 @@
+import { ModalLayer, type ModalView } from "./ModalLayer";
+import { ChordTimeline, RegionLane, Ruler } from "./Timeline";
+import { STEM_LABELS, messageLabel, normalizeErrorMessage, statusLabel } from "./labels";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, MouseEvent as ReactMouseEvent } from "react";
 import { assetUrl, deleteJob, exportInstrumentalUrl, exportMixUrl, exportStemsUrl, fetchAnalysis, fetchJob, fetchJobs, uploadAudio } from "./api";
@@ -15,7 +18,6 @@ import iconMoreFill from "./assets/figma-icons/more-fill.svg";
 import iconNext from "./assets/figma-icons/next.svg";
 import iconNotes from "./assets/figma-icons/notes.svg";
 import iconPiano from "./assets/figma-icons/piano.svg";
-import iconPlay from "./assets/figma-icons/play.svg";
 import iconPlus from "./assets/figma-icons/plus.svg";
 import iconPrev from "./assets/figma-icons/prev.svg";
 import iconProfile from "./assets/figma-icons/profile.svg";
@@ -32,15 +34,6 @@ const INITIAL_TRACKS: Record<StemName, TrackState> = {
   other: { muted: false, solo: false, volume: 0.72, pan: 0 }
 };
 
-const STEM_LABELS: Record<StemName, string> = {
-  vocals: "보컬",
-  drums: "드럼",
-  bass: "베이스",
-  guitar: "기타",
-  piano: "피아노",
-  other: "나머지"
-};
-
 const STEM_COLORS: Record<StemName, string> = {
   vocals: "#69caec",
   drums: "#72d1dc",
@@ -49,6 +42,12 @@ const STEM_COLORS: Record<StemName, string> = {
   piano: "#c7fbfd",
   other: "#e8fbfc"
 };
+
+const EMPTY_STEMS = (Object.keys(STEM_COLORS) as StemName[]).map((name) => ({
+  name,
+  color: STEM_COLORS[name],
+  waveform: []
+}));
 
 const STEM_ICONS: Record<StemName, string> = {
   vocals: iconMic,
@@ -65,7 +64,6 @@ const TOOL_ICONS: Record<string, string> = {
   profile: iconProfile,
   rewind: iconPrev,
   forward: iconNext,
-  play: iconPlay,
   speaker: iconSpeaker,
   metronome: iconMetronome,
   notes: iconNotes,
@@ -76,31 +74,10 @@ const TOOL_ICONS: Record<string, string> = {
   plus: iconPlus
 };
 
-const STATUS_LABELS: Record<string, string> = {
-  queued: "대기 중",
-  running: "분석 중",
-  done: "완료",
-  error: "오류",
-  ready: "준비됨"
-};
-
 type PanGraph = {
   audio: HTMLAudioElement;
   source: MediaElementAudioSourceNode;
   panner: StereoPannerNode;
-};
-
-const MESSAGE_LABELS: Record<string, string> = {
-  Queued: "대기열에 추가됨",
-  "Preparing audio": "오디오 준비 중",
-  "Separating stems": "스템 분리 중",
-  "Analyzing tempo, key, and chords": "템포, 키, 코드 분석 중",
-  "Extracting MIDI": "MIDI 추출 중",
-  "Compressing audio assets": "오디오 압축 저장 중",
-  "오디오 압축 저장 중": "오디오 압축 저장 중",
-  "Writing results": "결과 저장 중",
-  "Analysis complete": "분석 완료",
-  "Processing failed": "처리 실패"
 };
 
 const LIBRARY_STORAGE_KEY = "local-music-analysis-library-v1";
@@ -131,8 +108,6 @@ type LibraryMetadata = {
     pinned?: boolean;
   }>;
 };
-
-type ModalView = "add" | "upload" | "export" | null;
 
 export default function App() {
   const [job, setJob] = useState<JobResponse | null>(null);
@@ -202,7 +177,7 @@ export default function App() {
   const separationStatus = analysis?.separation_status ?? job?.separation_status;
   const separationError = analysis?.separation_error ?? job?.separation_error;
   const progress = Math.round((job?.progress ?? 0) * 100);
-  const stems = analysis?.stems ?? stemPlaceholders();
+  const stems = analysis?.stems ?? EMPTY_STEMS;
   const exportableStems = analysis?.separation_status === "succeeded"
     ? analysis.stems.filter((stem) => stem.audio_url).map((stem) => stem.name)
     : [];
@@ -1183,202 +1158,6 @@ function LyricsPanel({ title }: { title: string }) {
   );
 }
 
-function ModalLayer({
-  view,
-  fileName,
-  job,
-  progress,
-  error,
-  analysis,
-  exportStemSelection,
-  exportSeparateStems,
-  exportBusy,
-  exportFormat,
-  separationQuality,
-  separationEngine,
-  stemsOnly,
-  uploadBusy,
-  onExportFormatChange,
-  onQualityChange,
-  onEngineChange,
-  onStemsOnlyChange,
-  onClose,
-  onAddFolder,
-  onOpenUpload,
-  onFile,
-  onExportWhole,
-  onExportInstrumental,
-  onExportSelected,
-  onExportAllStems,
-  onExportSingle,
-  onToggleExportStem,
-  onExportSeparateChange
-}: {
-  view: ModalView;
-  fileName: string;
-  job: JobResponse | null;
-  progress: number;
-  error: string | null;
-  analysis: Analysis | null;
-  exportStemSelection: StemName[];
-  exportSeparateStems: boolean;
-  exportBusy: boolean;
-  exportFormat: AudioFormat;
-  separationQuality: SeparationQuality;
-  separationEngine: SeparationEngine | "";
-  stemsOnly: boolean;
-  uploadBusy: boolean;
-  onExportFormatChange: (format: AudioFormat) => void;
-  onQualityChange: (quality: SeparationQuality) => void;
-  onEngineChange: (engine: SeparationEngine | "") => void;
-  onStemsOnlyChange: (value: boolean) => void;
-  onClose: () => void;
-  onAddFolder: () => void;
-  onOpenUpload: () => void;
-  onFile: (file: File) => void | Promise<void>;
-  onExportWhole: () => void | Promise<void>;
-  onExportInstrumental: () => void;
-  onExportSelected: () => void | Promise<void>;
-  onExportAllStems: () => void;
-  onExportSingle: (stem: StemName) => void;
-  onToggleExportStem: (stem: StemName) => void;
-  onExportSeparateChange: (separate: boolean) => void;
-}) {
-  const status = statusLabel(job?.status ?? "ready");
-  const message = messageLabel(job?.message) ?? (fileName ? "파일 분석을 준비 중입니다" : "MP3 또는 WAV 파일을 선택하세요");
-  const exportableStems = analysis?.stems.filter((stem) => stem.audio_url) ?? [];
-  return (
-    <div className="fixed inset-0 z-80 grid place-items-center bg-[rgba(0,0,0,0.42)] [backdrop-filter:brightness(0.82)]" role="presentation">
-      {view === "add" && (
-        <section className="modalPanel modalWidth" role="dialog" aria-modal="true" aria-label="추가">
-          <button className="absolute top-[10px] right-[10px] size-[32px] cursor-pointer rounded-[5px] [border:0] bg-transparent text-[24px] leading-none text-[#dcdcdc] [&:hover]:bg-selected" aria-label="닫기" onClick={onClose}>×</button>
-          <strong>추가</strong>
-          <div className="grid grid-cols-2 gap-[12px]">
-            <button className="dialogControl dialogControlBorder min-h-[118px] p-[18px]" onClick={onAddFolder}>
-              <span className="text-[18px] font-extrabold">폴더</span>
-              <small className="text-[12px] text-[#bdbdbd]">새로운 폴더 생성</small>
-            </button>
-            <button className="dialogControl dialogControlBorder min-h-[118px] p-[18px]" onClick={onOpenUpload}>
-              <span className="text-[18px] font-extrabold">노래</span>
-              <small className="text-[12px] text-[#bdbdbd]">MP3/WAV 업로드</small>
-            </button>
-          </div>
-        </section>
-      )}
-
-      {view === "export" && (
-        <section className="modalPanel w-[min(620px,calc(100vw_-_40px))]" role="dialog" aria-modal="true" aria-label="내보내기">
-          <button className="absolute top-[10px] right-[10px] size-[32px] cursor-pointer rounded-[5px] [border:0] bg-transparent text-[24px] leading-none text-[#dcdcdc] [&:hover]:bg-selected" aria-label="닫기" onClick={onClose}>×</button>
-          <strong>내보내기</strong>
-          <label className="flex flex-wrap items-center gap-[10px] text-ui text-muted">
-            파일 형식
-            <select className="dialogSelect" value={exportFormat} disabled={exportBusy} onChange={(event) => onExportFormatChange(event.target.value as AudioFormat)}>
-              <option value="wav">WAV · PCM</option>
-              <option value="flac">FLAC · 무손실 압축</option>
-              <option value="m4a">M4A · AAC</option>
-            </select>
-          </label>
-          {analysis && !analysis.stem_audio && <small>이전 작업의 저장된 스템에서 변환합니다. AAC 원본의 손실은 복원되지 않습니다.</small>}
-          <div className="exportChoices grid grid-cols-[minmax(150px,0.85fr)_minmax(240px,1.15fr)] gap-[12px] [@media(max-width:640px)]:grid-cols-1">
-            <div className="grid [align-content:start] gap-ui">
-              <button className="dialogControl dialogControlBorder min-h-[36px] px-[10px] py-[6px]" disabled={exportBusy} onClick={() => void onExportWhole()}>전체 믹스 다운로드</button>
-              <button className="dialogControl dialogControlBorder min-h-[36px] px-[10px] py-[6px]" disabled={exportBusy} onClick={onExportInstrumental}>Instrumental 다운로드</button>
-              <button className="dialogControl dialogControlBorder min-h-[36px] px-[10px] py-[6px]" disabled={exportBusy} onClick={onExportAllStems}>6개 스템 ZIP 다운로드</button>
-            </div>
-            <div className="grid min-h-[180px] [align-content:start] gap-[10px] rounded-control border border-solid border-control bg-(image:--control-gradient) p-[18px] text-primary">
-              <span className="text-[18px] font-extrabold">파트별</span>
-              <div className="grid grid-cols-2 gap-ui">
-                {exportableStems.map((stem) => (
-                  <div className="flex gap-[4px]" key={stem.name}>
-                    <label className="flex min-h-[30px] flex-[1] items-center gap-[7px] rounded-[5px] border border-solid border-[#4f4f4f] bg-[#2d2d2d] px-ui py-[5px] text-ui font-extrabold text-primary">
-                      <input className="accent-check"
-                        type="checkbox"
-                        checked={exportStemSelection.includes(stem.name)}
-                        disabled={exportBusy}
-                        onChange={() => onToggleExportStem(stem.name)}
-                      />
-                      <b className="size-[10px] rounded-[50%]" style={{ background: stem.color }} />
-                      {STEM_LABELS[stem.name]}
-                    </label>
-                    <button className="dialogControl dialogControlBorder min-h-[36px] px-[10px] py-[6px]" type="button" disabled={exportBusy} onClick={() => onExportSingle(stem.name)} aria-label={`${STEM_LABELS[stem.name]} 다운로드`}>↓</button>
-                  </div>
-                ))}
-              </div>
-              <label className="flex min-h-[34px] items-center gap-ui rounded-[5px] border border-solid border-control bg-raised px-[9px] py-[6px] text-ui font-extrabold text-[#f2f2f2]">
-                <input
-                  className="accent-check"
-                  type="checkbox"
-                  checked={exportSeparateStems}
-                  disabled={exportBusy}
-                  onChange={(event) => onExportSeparateChange(event.target.checked)}
-                />
-                선택한 파트를 ZIP으로 묶기
-              </label>
-              <button className="dialogControl min-h-[42px] border-[#68d7e5] px-[14px] py-[10px]" disabled={exportBusy || !exportStemSelection.length} onClick={() => void onExportSelected()}>
-                선택한 파트 {exportSeparateStems ? "ZIP" : "믹스"} 다운로드
-              </button>
-            </div>
-          </div>
-          {exportBusy && <small role="status">내보내는 중</small>}
-          {error && <p className="m-0 text-ui font-extrabold text-failure">{error}</p>}
-        </section>
-      )}
-
-      {view === "upload" && (
-        <section className="modalPanel modalWidth" role="dialog" aria-modal="true" aria-label="노래 업로드">
-          <button className="absolute top-[10px] right-[10px] size-[32px] cursor-pointer rounded-[5px] [border:0] bg-transparent text-[24px] leading-none text-[#dcdcdc] [&:hover]:bg-selected" aria-label="닫기" onClick={onClose}>×</button>
-          <strong>노래 업로드</strong>
-          <label className="flex flex-wrap items-center gap-[10px] text-ui text-muted">
-            분리 품질
-            <select className="dialogSelect" value={separationQuality} disabled={uploadBusy} onChange={(event) => onQualityChange(event.target.value as SeparationQuality)}>
-              <option value="standard">Standard</option>
-              <option value="high">High Quality</option>
-            </select>
-          </label>
-          {separationQuality === "high" && <small>여러 번 추론하므로 더 오래 걸리며, 개선 폭은 곡에 따라 다릅니다.</small>}
-          <label className="flex flex-wrap items-center gap-[10px] text-ui text-muted">
-            분리 엔진
-            <select className="dialogSelect" value={separationEngine} disabled={uploadBusy} onChange={(event) => onEngineChange(event.target.value as SeparationEngine | "")}>
-              <option value="">서버 기본값</option>
-              <option value="torch">PyTorch</option>
-              <option value="mps">PyTorch MPS · Mac</option>
-              <option value="mlx">Fast · MLX · Apple Silicon</option>
-            </select>
-          </label>
-          <label className="flex flex-wrap items-center gap-[10px] text-ui text-muted">
-            <input type="checkbox" checked={stemsOnly} disabled={uploadBusy} onChange={(event) => onStemsOnlyChange(event.target.checked)} />
-            스템만 분리 (BPM·키·코드 및 MIDI 생략)
-          </label>
-          <label className="dialogControl dialogControlBorder relative min-h-[110px] overflow-hidden p-[18px] text-center">
-            <input
-              className="absolute inset-0 m-0 h-full w-full cursor-pointer p-0 opacity-0"
-              type="file"
-              disabled={uploadBusy}
-              accept=".mp3,.wav,audio/mpeg,audio/wav"
-              onChange={(event) => {
-                const file = event.target.files?.[0];
-                event.currentTarget.value = "";
-                if (file) void onFile(file);
-              }}
-            />
-            <span className="text-[18px] font-extrabold">{fileName || "파일 선택"}</span>
-            <small className="text-[12px] text-[#bdbdbd]">MP3 또는 WAV</small>
-          </label>
-          <div className="uploadStatus grid grid-cols-[1fr_auto] gap-[10px] rounded-ui border border-solid border-[#252525] bg-[#252525] p-[14px] text-ui text-[#cfcfcf]">
-            <span>{uploadBusy ? "업로드 중" : status}</span>
-            <strong>{progress}%</strong>
-            <div className="meterBar">
-              <div style={{ width: `${progress}%` }} />
-            </div>
-            <p>{error || job?.error ? normalizeErrorMessage(error ?? job?.error) : uploadBusy ? "파일을 전송하고 있습니다." : message}</p>
-            {job?.separation_error && <p className="separationNotice failed">{job.separation_error}</p>}
-          </div>
-        </section>
-      )}
-    </div>
-  );
-}
-
 function LibraryRow({
   open,
   label,
@@ -1528,23 +1307,6 @@ function SongRow({
   );
 }
 
-function Ruler({ currentTime, duration, onSeek }: { currentTime: number; duration: number; onSeek: (time: number) => void }) {
-  return (
-    <div
-      className="ruler"
-      onClick={(event) => {
-        const rect = event.currentTarget.getBoundingClientRect();
-        onSeek(((event.clientX - rect.left) / rect.width) * duration);
-      }}
-    >
-      <div className="rulerTicks">
-        {Array.from({ length: 48 }).map((_, index) => <i key={index} />)}
-      </div>
-      <b style={{ left: `${duration ? (currentTime / duration) * 100 : 0}%` }} />
-    </div>
-  );
-}
-
 function TrackControlsRow({
   name,
   color,
@@ -1600,90 +1362,6 @@ function TrackControlsRow({
       </label>
     </div>
   );
-}
-
-function RegionLane({
-  color,
-  waveform,
-  emptyLabel,
-  duration,
-  currentTime,
-  onSeek
-}: {
-  color: string;
-  waveform: number[];
-  emptyLabel: string;
-  duration: number;
-  currentTime: number;
-  onSeek: (time: number) => void;
-}) {
-  const peaks = waveform.length ? resamplePeaks(waveform, Math.max(500, Math.min(3600, Math.round(duration * 9)))) : [];
-  const wavePath = peaks.length ? buildWavePath(peaks) : "";
-  return (
-    <div
-      className="regionLane"
-      style={{ "--accent": color } as CSSProperties}
-      onClick={(event) => {
-        const rect = event.currentTarget.getBoundingClientRect();
-        onSeek(((event.clientX - rect.left) / rect.width) * duration);
-      }}
-    >
-      <div className="region">
-        <div className={`regionWave relative h-full py-[7px] ${peaks.length ? "" : "empty"}`}>
-          {peaks.length ? (
-            <svg className="waveSvg block h-full w-full" viewBox="0 0 1000 100" preserveAspectRatio="none" aria-hidden="true">
-              <line x1="0" x2="1000" y1="50" y2="50" />
-              <path d={wavePath} />
-            </svg>
-          ) : (
-            <small>{emptyLabel}</small>
-          )}
-        </div>
-      </div>
-      <i className="playhead" style={{ left: `${duration ? (currentTime / duration) * 100 : 0}%` }} />
-    </div>
-  );
-}
-
-function ChordTimeline({ analysis, currentTime, onSeek }: { analysis: Analysis | null; currentTime: number; onSeek: (time: number) => void }) {
-  const duration = analysis?.duration ?? 30;
-  const chords = analysis?.chords ?? [
-    { start: 0, end: 7.5, label: "C", confidence: 0.4 },
-    { start: 7.5, end: 15, label: "G", confidence: 0.4 },
-    { start: 15, end: 22.5, label: "Am", confidence: 0.4 },
-    { start: 22.5, end: 30, label: "F", confidence: 0.4 }
-  ];
-  return (
-    <div
-      className="chordTimeline"
-      onClick={(event) => {
-        const rect = event.currentTarget.getBoundingClientRect();
-        onSeek(((event.clientX - rect.left) / rect.width) * duration);
-      }}
-    >
-      {chords.map((chord, index) => (
-        <span
-          key={`${chord.label}-${chord.start}-${index}`}
-          style={{
-            left: `${(chord.start / duration) * 100}%`,
-            width: `${Math.max(1, ((chord.end - chord.start) / duration) * 100)}%`
-          }}
-        >
-          {chord.label}
-        </span>
-      ))}
-      <i style={{ left: `${duration ? (currentTime / duration) * 100 : 0}%` }} />
-    </div>
-  );
-}
-
-function statusLabel(status: string) {
-  return STATUS_LABELS[status] ?? status;
-}
-
-function messageLabel(message?: string) {
-  if (!message) return null;
-  return MESSAGE_LABELS[message] ?? message;
 }
 
 function modeLabel(mode: string) {
@@ -1747,17 +1425,6 @@ function translateWarning(warning: string) {
     return "저장 용량을 줄이기 위해 fallback 무음 stem 파일 생성을 생략했습니다.";
   }
   return warning;
-}
-
-function stemPlaceholders() {
-  return [
-    { name: "vocals" as StemName, color: STEM_COLORS.vocals, waveform: [] },
-    { name: "drums" as StemName, color: STEM_COLORS.drums, waveform: [] },
-    { name: "bass" as StemName, color: STEM_COLORS.bass, waveform: [] },
-    { name: "guitar" as StemName, color: STEM_COLORS.guitar, waveform: [] },
-    { name: "piano" as StemName, color: STEM_COLORS.piano, waveform: [] },
-    { name: "other" as StemName, color: STEM_COLORS.other, waveform: [] }
-  ];
 }
 
 function applyStemPalette(analysis: Analysis): Analysis {
@@ -1913,20 +1580,6 @@ function safeFileBase(name: string) {
   return (name || "song").replace(/\.[^/.]+$/, "").replace(/[\\/:*?"<>|]/g, "_").trim() || "song";
 }
 
-function normalizeErrorMessage(errorValue: unknown) {
-  const raw = errorValue instanceof Error ? errorValue.message : String(errorValue ?? "");
-  const withoutPrefix = raw.replace(/^Error:\s*/i, "").trim();
-  try {
-    const parsed = JSON.parse(withoutPrefix) as { detail?: string };
-    if (parsed.detail === "Method Not Allowed") {
-      return "백엔드 서버의 API가 아직 최신 코드로 실행되지 않았습니다. 서버를 재시작한 뒤 다시 시도하세요.";
-    }
-    return parsed.detail ?? withoutPrefix;
-  } catch {
-    return withoutPrefix;
-  }
-}
-
 function formatTime(seconds: number) {
   const safe = Math.max(0, Number.isFinite(seconds) ? seconds : 0);
   const mins = Math.floor(safe / 60).toString().padStart(2, "0");
@@ -1935,38 +1588,10 @@ function formatTime(seconds: number) {
   return `${mins}:${secs}.${millis}`;
 }
 
-function resamplePeaks(peaks: number[], targetLength: number) {
-  if (peaks.length === targetLength) return peaks;
-  if (peaks.length === 1) return Array.from({ length: targetLength }, () => peaks[0]);
-  return Array.from({ length: targetLength }, (_, index) => {
-    const position = (index / Math.max(1, targetLength - 1)) * (peaks.length - 1);
-    const left = Math.floor(position);
-    const right = Math.min(peaks.length - 1, left + 1);
-    const blend = position - left;
-    return peaks[left] * (1 - blend) + peaks[right] * blend;
-  });
-}
-
 function getCurrentChord(analysis: Analysis | null, time: number) {
   if (!analysis || !analysis.chords.length) return "--";
   const chord = analysis.chords.find((item) => time >= item.start && time < item.end) ?? analysis.chords[analysis.chords.length - 1];
   return chord?.label ?? "--";
-}
-
-function buildWavePath(peaks: number[]) {
-  const width = 1000;
-  const mid = 50;
-  const topPoints = peaks.map((peak, index) => {
-    const x = (index / Math.max(1, peaks.length - 1)) * width;
-    const amp = Math.max(1, Math.min(48, peak * 58));
-    return `${x.toFixed(2)},${(mid - amp).toFixed(2)}`;
-  });
-  const bottomPoints = peaks.map((peak, index) => {
-    const x = (index / Math.max(1, peaks.length - 1)) * width;
-    const amp = Math.max(1, Math.min(48, peak * 58));
-    return `${x.toFixed(2)},${(mid + amp).toFixed(2)}`;
-  }).reverse();
-  return `M ${topPoints.join(" L ")} L ${bottomPoints.join(" L ")} Z`;
 }
 
 function clamp(value: number, min: number, max: number) {

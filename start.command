@@ -111,13 +111,17 @@ fi
 case "${MUSIC_ENABLE_DEMUCS:-1}" in
   0|false|no|off) echo "Demucs is disabled in this environment." ;;
   *)
-    if ! demucs_is_ready; then
+    demucs_ready=0
+    if demucs_is_ready; then
+      demucs_ready=1
+    else
       echo "Demucs/PyTorch is missing or cannot run in $BACKEND_VENV."
       if confirm "Install the optional Demucs, analysis, and MIDI packages?"; then
         "$BACKEND_VENV/bin/python" -m pip install -r "$BACKEND_DIR/requirements-optional.txt" || true
+        if demucs_is_ready; then demucs_ready=1; fi
       fi
     fi
-    if demucs_is_ready; then
+    if [ "$demucs_ready" -eq 1 ]; then
       "$BACKEND_VENV/bin/python" -c 'import platform, torch; print(f"Demucs uses PyTorch {torch.__version__} on {platform.machine()}.")'
       if check_model >/dev/null 2>&1; then
         echo "The htdemucs_6s model is ready."
@@ -174,7 +178,7 @@ build_hybrid() {
     *) dsp_library=libmusic_dsp.so ;;
   esac
   stage="$(mktemp -d "$HYBRID_BIN/build.XXXXXX")" || return 1
-  if (cd "$BACKEND_DIR/go" && go build -o "$stage/music-api" .) \
+  if (cd "$BACKEND_DIR/go" && go build -ldflags="-s -w" -o "$stage/music-api" .) \
       && cargo build --release --locked --manifest-path "$BACKEND_DIR/rust/Cargo.toml" \
       && cp "$BACKEND_DIR/rust/target/release/music-dsp" \
         "$BACKEND_DIR/rust/target/release/$dsp_library" "$stage/"; then

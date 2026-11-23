@@ -33,7 +33,27 @@ The default Docker/Render deployment runs music analysis only. To build a Docker
 uvicorn app.main:app --reload --port 8000
 ```
 
+## Project footprint validation
+
+The local checkout fell from 2,243.4 to 2,190.1 MiB on an Apple M5 with 16 GiB of memory. Removing unused Essentia saved 47.2 MiB across the Python environments. The launcher strips debug symbols from the Go release binary, and Cargo now strips symbols from Rust release artifacts. Normal development builds remain available. The Go binary fell from 9.82 to 6.76 MiB, and the combined Rust runtime artifacts fell from 881.5 to 695.9 KiB.
+
+Model caches and existing job data were retained. Browser builds preserved the production CSS byte for byte, and ten screenshots matched at 1440px and 1280px. The 60-, 180-, and 300-second comparisons matched WAV and MIDI bytes, as well as BPM, key, chord data, confidence values, and waveform points.
+
+### Runtime guardrails
+
+These measurements compare the revision immediately before the footprint changes with this revision. Each value is the median of three jobs on the same synthetic MP3, using MLX Standard and real Basic Pitch MIDI.
+
+| Input | First run | Uncached repeat | Cache hit |
+| --- | ---: | ---: | ---: |
+| 60 s | 7.90 → 7.52 s | 5.30 → 5.03 s | 0.34 → 0.33 s |
+| 180 s | 16.25 → 16.27 s | 16.19 → 15.30 s | 0.93 → 0.62 s |
+| 300 s | 36.64 → 28.52 s | 32.16 → 26.62 s | 0.95 → 0.96 s |
+
+With prepared binaries, the median time for the launcher to bring both services online went from 2.66 to 2.42 s. The initial 300-second comparison showed higher sampled process-tree peak RSS, from 1.10 to 1.42 GiB. An alternating-order rerun measured 1.33 → 1.36 GiB and 27.02 → 27.39 s. These runs do not establish a processing speedup or a memory improvement for the 300-second workload.
+
 ## Hybrid pipeline optimization
+
+This benchmark is from the earlier harmonic filtering, Core ML batching, and MIDI cache changes.
 
 The optional Rust DSP library runs the two 31-sample median filters used in harmonic/percussive separation. Librosa still handles the STFT, mask, inverse transform, and chroma calculation. The worker uses the original librosa filter when the Rust library is unavailable.
 

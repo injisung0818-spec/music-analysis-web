@@ -4,7 +4,6 @@ from __future__ import annotations
 import asyncio
 import os
 import re
-import shutil
 import signal
 from contextlib import asynccontextmanager
 from contextlib import suppress
@@ -13,7 +12,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException
 
 from . import main
-from .processor import STEMS, JobState, MusicProcessor, now_iso, read_cached_music
+from .processor import JobState, MusicProcessor, link_stem_wavs, now_iso, read_cached_music
 
 running: set[asyncio.Task] = set()
 owner_pid: int | None = None
@@ -65,18 +64,9 @@ async def process_job(job_id: str, cache: dict[str, list[str]]) -> None:
         for candidate in cache.get(key, []):
             if not re.fullmatch(r"[0-9a-f]{32}", candidate):
                 continue
-            try:
-                destination.mkdir()
-                for stem in STEMS:
-                    filename = f"{stem}.wav"
-                    source = main.JOBS_DIR / candidate / "stems" / filename
-                    if source.is_symlink():
-                        raise OSError("unexpected stem symlink")
-                    os.link(source, destination / filename)
-            except OSError:
-                shutil.rmtree(destination, ignore_errors=True)
-            else:
-                return main.JOBS_DIR / candidate
+            job_dir = main.JOBS_DIR / candidate
+            if link_stem_wavs(job_dir / "stems", destination):
+                return job_dir
         return None
 
     async def reuse_music(key: str) -> dict | None:

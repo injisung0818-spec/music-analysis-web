@@ -3,6 +3,5 @@ librosa>=0.10
 numpy>=1.26
 demucs>=4.1,<5
 basic-pitch>=0.4
-essentia>=2.1b6.dev1110; python_version < "3.13"
 scikit-learn<=1.5.1
 setuptools<81
